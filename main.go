@@ -204,13 +204,9 @@ func onReady() {
 
 	systray.AddSeparator()
 
-	mLaunch := systray.AddMenuItem("", "Toggle launch at login")
+	mLaunch := systray.AddMenuItem("Launch at Login", "Toggle launch at login")
 	if isLaunchAgentInstalled() {
-		mLaunch.SetTitle("✓ Launch at Login")
 		mLaunch.Check()
-	} else {
-		mLaunch.SetTitle("  Launch at Login")
-		mLaunch.Uncheck()
 	}
 
 	mQuit := systray.AddMenuItem("Quit", "")
@@ -227,11 +223,9 @@ func onReady() {
 			case <-mLaunch.ClickedCh:
 				if isLaunchAgentInstalled() {
 					removeLaunchAgent()
-					mLaunch.SetTitle("  Launch at Login")
 					mLaunch.Uncheck()
 				} else {
 					installLaunchAgent()
-					mLaunch.SetTitle("✓ Launch at Login")
 					mLaunch.Check()
 				}
 			case <-mQuit.ClickedCh:
