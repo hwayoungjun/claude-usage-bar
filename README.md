@@ -30,26 +30,12 @@ go build -o claude-usage-bar .
 
 ## Setup
 
-Add the statusLine hook to `~/.claude/settings.json`:
-
-```json
-{
-  "statusLine": {
-    "type": "command",
-    "command": "claude-usage-bar statusline"
-  }
-}
-```
-
-Or run `claude-usage-bar setup` to see the configuration.
-
-## Usage
-
 ```bash
+claude-usage-bar setup        # Auto-configure ~/.claude/settings.json
 claude-usage-bar              # Launch menu bar widget
-claude-usage-bar statusline   # StatusLine handler (used by Claude Code)
-claude-usage-bar setup        # Print setup instructions
 ```
+
+That's it. Restart Claude Code after setup.
 
 Auto-start on login:
 

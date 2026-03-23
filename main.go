@@ -77,8 +77,8 @@ func printHelp() {
 
 Usage:
   %s              Launch the menu bar widget
-  %s statusline   StatusLine handler (reads stdin from Claude Code)
-  %s setup        Print Claude Code settings.json configuration
+  %s statusline   StatusLine handler (used by Claude Code)
+  %s setup        Auto-configure ~/.claude/settings.json
 `, appName, appName, appName, appName)
 }
 
@@ -126,13 +126,46 @@ func runStatusLine() {
 // ── Setup subcommand ──
 
 func runSetup() {
-	fmt.Println("Add this to your ~/.claude/settings.json:")
-	fmt.Println()
-	fmt.Printf(`  "statusLine": {
-    "type": "command",
-    "command": "%s statusline"
-  }
-`, appName)
+	home, _ := os.UserHomeDir()
+	settingsPath := filepath.Join(home, ".claude", "settings.json")
+
+	// Read existing settings
+	var settings map[string]interface{}
+	raw, err := os.ReadFile(settingsPath)
+	if err != nil {
+		// No settings file yet — create one
+		settings = make(map[string]interface{})
+	} else {
+		if err := json.Unmarshal(raw, &settings); err != nil {
+			fmt.Fprintf(os.Stderr, "Error parsing %s: %v\n", settingsPath, err)
+			os.Exit(1)
+		}
+	}
+
+	// Check if already configured
+	if sl, ok := settings["statusLine"].(map[string]interface{}); ok {
+		if cmd, ok := sl["command"].(string); ok && cmd == appName+" statusline" {
+			fmt.Println("✓ Already configured in", settingsPath)
+			return
+		}
+	}
+
+	// Set statusLine
+	settings["statusLine"] = map[string]string{
+		"type":    "command",
+		"command": appName + " statusline",
+	}
+
+	// Write back
+	os.MkdirAll(filepath.Dir(settingsPath), 0755)
+	out, _ := json.MarshalIndent(settings, "", "  ")
+	if err := os.WriteFile(settingsPath, out, 0644); err != nil {
+		fmt.Fprintf(os.Stderr, "Error writing %s: %v\n", settingsPath, err)
+		os.Exit(1)
+	}
+
+	fmt.Println("✓ Added statusLine to", settingsPath)
+	fmt.Println("  Restart Claude Code to activate.")
 }
 
 // ── Menu bar widget ──
