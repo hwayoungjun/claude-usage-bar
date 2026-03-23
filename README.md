@@ -2,7 +2,7 @@
 
 macOS menu bar widget that displays your Claude Code rate limit usage in real time.
 
-![screenshot](screenshot.png)
+<img src="screenshot.png" width="400" alt="screenshot">
 
 ## How it works
 
