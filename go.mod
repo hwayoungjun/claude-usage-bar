@@ -1,4 +1,4 @@
-module github.com/hwayoung/claude-usage-bar
+module github.com/hwayoungjun/claude-usage-bar
 
 go 1.26.1
 
