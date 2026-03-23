@@ -204,6 +204,15 @@ func onReady() {
 
 	systray.AddSeparator()
 
+	mLaunch := systray.AddMenuItem("", "Toggle launch at login")
+	if isLaunchAgentInstalled() {
+		mLaunch.SetTitle("✓ Launch at Login")
+		mLaunch.Check()
+	} else {
+		mLaunch.SetTitle("  Launch at Login")
+		mLaunch.Uncheck()
+	}
+
 	mQuit := systray.AddMenuItem("Quit", "")
 
 	setInactive()
@@ -213,8 +222,22 @@ func onReady() {
 	go periodicRefresh()
 
 	go func() {
-		<-mQuit.ClickedCh
-		systray.Quit()
+		for {
+			select {
+			case <-mLaunch.ClickedCh:
+				if isLaunchAgentInstalled() {
+					removeLaunchAgent()
+					mLaunch.SetTitle("  Launch at Login")
+					mLaunch.Uncheck()
+				} else {
+					installLaunchAgent()
+					mLaunch.SetTitle("✓ Launch at Login")
+					mLaunch.Check()
+				}
+			case <-mQuit.ClickedCh:
+				systray.Quit()
+			}
+		}
 	}()
 }
 
@@ -354,6 +377,51 @@ func fmtAgo(d time.Duration) string {
 		return fmt.Sprintf("%dm ago", int(d.Minutes()))
 	}
 	return fmt.Sprintf("%dh%dm ago", int(d.Hours()), int(d.Minutes())%60)
+}
+
+// ── LaunchAgent ──
+
+const launchAgentLabel = "com.github.hwayoungjun.claude-usage-bar"
+
+func launchAgentPath() string {
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, "Library", "LaunchAgents", launchAgentLabel+".plist")
+}
+
+func isLaunchAgentInstalled() bool {
+	_, err := os.Stat(launchAgentPath())
+	return err == nil
+}
+
+func installLaunchAgent() error {
+	binPath, _ := os.Executable()
+	binPath, _ = filepath.Abs(binPath)
+
+	plist := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>%s</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>%s</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<false/>
+</dict>
+</plist>
+`, launchAgentLabel, binPath)
+
+	dir := filepath.Dir(launchAgentPath())
+	os.MkdirAll(dir, 0755)
+	return os.WriteFile(launchAgentPath(), []byte(plist), 0644)
+}
+
+func removeLaunchAgent() error {
+	return os.Remove(launchAgentPath())
 }
 
 func loadUsage() (*UsageData, error) {
