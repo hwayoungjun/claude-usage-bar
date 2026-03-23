@@ -305,7 +305,7 @@ func setStale(d *UsageData, staleness time.Duration) {
 	s := pct(d.FiveHour.UsedPercentage)
 	w := pct(d.SevenDay.UsedPercentage)
 
-	systray.SetTitle(fmt.Sprintf("[ 5h %s  ·  7d %s  ⏸ ]", s, w))
+	systray.SetTitle("[ ⏸ ]")
 
 	m5hLabel.SetTitle(fmt.Sprintf("5h Session                           %s used", s))
 	m5hBar.SetTitle(bar(d.FiveHour.UsedPercentage))
@@ -319,7 +319,7 @@ func setStale(d *UsageData, staleness time.Duration) {
 }
 
 func setInactive() {
-	systray.SetTitle("[ 5h --  ·  7d -- ]")
+	systray.SetTitle("[ ⏸ ]")
 
 	m5hLabel.SetTitle("5h Session                            --")
 	m5hBar.SetTitle(strings.Repeat("░", barWidth))
