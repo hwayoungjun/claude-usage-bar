@@ -1,0 +1,5 @@
+claude-usage-bar
+*.exe
+*.dll
+*.so
+*.dylib
