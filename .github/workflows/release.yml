@@ -13,7 +13,7 @@ jobs:
           - os: macos-latest
             arch: arm64
             goarch: arm64
-          - os: macos-13
+          - os: macos-latest
             arch: amd64
             goarch: amd64
     runs-on: ${{ matrix.os }}
