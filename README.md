@@ -20,32 +20,42 @@ brew tap hwayoungjun/tap
 brew install claude-usage-bar
 ```
 
+Setup is automatic — `~/.claude/settings.json` is configured on install and every app launch.
+
 Or build from source:
 
 ```bash
 git clone https://github.com/hwayoungjun/claude-usage-bar.git
 cd claude-usage-bar
 go build -o claude-usage-bar .
+./claude-usage-bar setup
 ```
 
-## Setup
+## Usage
 
 ```bash
-claude-usage-bar setup        # Auto-configure ~/.claude/settings.json
-claude-usage-bar              # Launch menu bar widget
+claude-usage-bar                # Launch (backgrounds automatically)
 ```
 
-That's it. Restart Claude Code after setup.
-
-Auto-start on login:
+Auto-start on login (pick one):
 
 ```bash
-brew services start claude-usage-bar
+brew services start claude-usage-bar    # via Homebrew service
 ```
+
+Or enable **"Launch at Login"** from the dropdown menu.
+
+## Uninstall
+
+```bash
+brew uninstall claude-usage-bar
+```
+
+This automatically removes the LaunchAgent, statusLine config, and app data.
 
 ## Requirements
 
-- macOS
+- macOS (Apple Silicon / Intel)
 - Claude Code v2.1.80+ (for `rate_limits` in statusLine)
 - Claude Pro / Max / Team plan (rate limit data requires a subscription)
 
