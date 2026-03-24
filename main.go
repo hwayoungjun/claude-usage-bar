@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -63,12 +64,16 @@ func main() {
 		case "setup":
 			runSetup()
 			return
+		case "uninstall":
+			runUninstall()
+			return
 		case "-h", "--help", "help":
 			printHelp()
 			return
 		}
 	}
 
+	ensureSetup()
 	systray.Run(onReady, onExit)
 }
 
@@ -79,7 +84,8 @@ Usage:
   %s              Launch the menu bar widget
   %s statusline   StatusLine handler (used by Claude Code)
   %s setup        Auto-configure ~/.claude/settings.json
-`, appName, appName, appName, appName)
+  %s uninstall    Remove all config, LaunchAgent, and statusLine settings
+`, appName, appName, appName, appName, appName)
 }
 
 // ── StatusLine subcommand ──
@@ -123,9 +129,10 @@ func runStatusLine() {
 	fmt.Println("")
 }
 
-// ── Setup subcommand ──
+// ── Setup ──
 
-func runSetup() {
+// setupStatusLine configures ~/.claude/settings.json and returns any error.
+func setupStatusLine() error {
 	home, _ := os.UserHomeDir()
 	settingsPath := filepath.Join(home, ".claude", "settings.json")
 
@@ -133,20 +140,17 @@ func runSetup() {
 	var settings map[string]interface{}
 	raw, err := os.ReadFile(settingsPath)
 	if err != nil {
-		// No settings file yet — create one
 		settings = make(map[string]interface{})
 	} else {
 		if err := json.Unmarshal(raw, &settings); err != nil {
-			fmt.Fprintf(os.Stderr, "Error parsing %s: %v\n", settingsPath, err)
-			os.Exit(1)
+			return fmt.Errorf("error parsing %s: %v", settingsPath, err)
 		}
 	}
 
 	// Check if already configured
 	if sl, ok := settings["statusLine"].(map[string]interface{}); ok {
 		if cmd, ok := sl["command"].(string); ok && cmd == appName+" statusline" {
-			fmt.Println("✓ Already configured in", settingsPath)
-			return
+			return nil
 		}
 	}
 
@@ -157,15 +161,95 @@ func runSetup() {
 	}
 
 	// Write back
-	os.MkdirAll(filepath.Dir(settingsPath), 0755)
+	dir := filepath.Dir(settingsPath)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return fmt.Errorf("error creating directory %s: %v", dir, err)
+	}
 	out, _ := json.MarshalIndent(settings, "", "  ")
 	if err := os.WriteFile(settingsPath, out, 0644); err != nil {
-		fmt.Fprintf(os.Stderr, "Error writing %s: %v\n", settingsPath, err)
-		os.Exit(1)
+		return fmt.Errorf("error writing %s: %v", settingsPath, err)
 	}
 
-	fmt.Println("✓ Added statusLine to", settingsPath)
-	fmt.Println("  Restart Claude Code to activate.")
+	return nil
+}
+
+// ensureSetup runs setup silently on every app launch.
+func ensureSetup() {
+	if err := setupStatusLine(); err != nil {
+		fmt.Fprintln(os.Stderr, "Auto-setup failed:", err)
+	}
+}
+
+// runSetup is the CLI entrypoint for `claude-usage-bar setup`.
+func runSetup() {
+	if err := setupStatusLine(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		home, _ := os.UserHomeDir()
+		settingsPath := filepath.Join(home, ".claude", "settings.json")
+		fmt.Fprintln(os.Stderr, "")
+		fmt.Fprintln(os.Stderr, "Please add the following to", settingsPath, "manually:")
+		fmt.Fprintln(os.Stderr, `  "statusLine": { "type": "command", "command": "claude-usage-bar statusline" }`)
+		fmt.Fprintln(os.Stderr, "")
+		fmt.Fprintln(os.Stderr, "If you see 'operation not permitted', check macOS Privacy & Security > Full Disk Access.")
+		os.Exit(1)
+	}
+	home, _ := os.UserHomeDir()
+	fmt.Println("✓ Configured statusLine in", filepath.Join(home, ".claude", "settings.json"))
+}
+
+// ── Uninstall subcommand ──
+
+func runUninstall() {
+	fmt.Println("Uninstalling", appName+"...")
+
+	// 1. Remove LaunchAgent
+	if isLaunchAgentInstalled() {
+		// Unload the agent first
+		exec.Command("launchctl", "bootout", fmt.Sprintf("gui/%d", os.Getuid()), launchAgentPath()).Run()
+		if err := removeLaunchAgent(); err != nil {
+			fmt.Fprintf(os.Stderr, "  ✗ Failed to remove LaunchAgent: %v\n", err)
+		} else {
+			fmt.Println("  ✓ Removed LaunchAgent")
+		}
+	} else {
+		fmt.Println("  - LaunchAgent not found (skipped)")
+	}
+
+	// 2. Remove statusLine from ~/.claude/settings.json
+	home, _ := os.UserHomeDir()
+	settingsPath := filepath.Join(home, ".claude", "settings.json")
+	if raw, err := os.ReadFile(settingsPath); err == nil {
+		var settings map[string]interface{}
+		if err := json.Unmarshal(raw, &settings); err == nil {
+			if sl, ok := settings["statusLine"].(map[string]interface{}); ok {
+				if cmd, ok := sl["command"].(string); ok && strings.Contains(cmd, appName) {
+					delete(settings, "statusLine")
+					out, _ := json.MarshalIndent(settings, "", "  ")
+					if err := os.WriteFile(settingsPath, out, 0644); err != nil {
+						fmt.Fprintf(os.Stderr, "  ✗ Failed to update %s: %v\n", settingsPath, err)
+					} else {
+						fmt.Println("  ✓ Removed statusLine from", settingsPath)
+					}
+				}
+			}
+		}
+	} else {
+		fmt.Println("  - Settings file not found (skipped)")
+	}
+
+	// 3. Remove config directory
+	cfgDir := configDir()
+	if _, err := os.Stat(cfgDir); err == nil {
+		if err := os.RemoveAll(cfgDir); err != nil {
+			fmt.Fprintf(os.Stderr, "  ✗ Failed to remove %s: %v\n", cfgDir, err)
+		} else {
+			fmt.Println("  ✓ Removed", cfgDir)
+		}
+	} else {
+		fmt.Println("  - Config directory not found (skipped)")
+	}
+
+	fmt.Println("Done.")
 }
 
 // ── Menu bar widget ──
@@ -387,9 +471,24 @@ func isLaunchAgentInstalled() bool {
 	return err == nil
 }
 
-func installLaunchAgent() error {
+func stableBinPath() string {
+	// Prefer the PATH-based path (e.g. /opt/homebrew/bin/claude-usage-bar)
+	// which is a stable symlink that survives brew upgrades.
+	// os.Executable() resolves symlinks on macOS, returning the Cellar path
+	// which breaks after brew upgrade.
+	if p, err := exec.LookPath(appName); err == nil {
+		if abs, err := filepath.Abs(p); err == nil {
+			return abs
+		}
+	}
+	// Fallback to the resolved executable path
 	binPath, _ := os.Executable()
 	binPath, _ = filepath.Abs(binPath)
+	return binPath
+}
+
+func installLaunchAgent() error {
+	binPath := stableBinPath()
 
 	plist := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
