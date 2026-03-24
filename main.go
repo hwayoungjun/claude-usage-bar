@@ -55,6 +55,8 @@ func usageFilePath() string {
 
 // ── Entry point ──
 
+const envDaemon = "CLAUDE_USAGE_BAR_DAEMON"
+
 func main() {
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
@@ -67,25 +69,47 @@ func main() {
 		case "uninstall":
 			runUninstall()
 			return
+		case "--foreground":
+			ensureSetup()
+			systray.Run(onReady, onExit)
+			return
 		case "-h", "--help", "help":
 			printHelp()
 			return
 		}
 	}
 
-	ensureSetup()
-	systray.Run(onReady, onExit)
+	// Already running as daemon child — start the widget
+	if os.Getenv(envDaemon) == "1" {
+		ensureSetup()
+		systray.Run(onReady, onExit)
+		return
+	}
+
+	// Fork to background and exit the parent
+	bin := stableBinPath()
+	cmd := exec.Command(bin)
+	cmd.Env = append(os.Environ(), envDaemon+"=1")
+	cmd.Stdin = nil
+	cmd.Stdout = nil
+	cmd.Stderr = nil
+	if err := cmd.Start(); err != nil {
+		fmt.Fprintln(os.Stderr, "Failed to start in background:", err)
+		os.Exit(1)
+	}
+	fmt.Println("claude-usage-bar started (pid", cmd.Process.Pid, ")")
 }
 
 func printHelp() {
 	fmt.Printf(`%s — Claude Code usage monitor for macOS menu bar
 
 Usage:
-  %s              Launch the menu bar widget
+  %s              Launch the menu bar widget (backgrounds automatically)
+  %s --foreground Launch in foreground (for debugging)
   %s statusline   StatusLine handler (used by Claude Code)
   %s setup        Auto-configure ~/.claude/settings.json
   %s uninstall    Remove all config, LaunchAgent, and statusLine settings
-`, appName, appName, appName, appName, appName)
+`, appName, appName, appName, appName, appName, appName)
 }
 
 // ── StatusLine subcommand ──
@@ -499,6 +523,7 @@ func installLaunchAgent() error {
 	<key>ProgramArguments</key>
 	<array>
 		<string>%s</string>
+		<string>--foreground</string>
 	</array>
 	<key>RunAtLoad</key>
 	<true/>
