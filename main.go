@@ -7,7 +7,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/fsnotify/fsnotify"
@@ -53,6 +55,38 @@ func usageFilePath() string {
 	return filepath.Join(configDir(), "usage.json")
 }
 
+// ── PID file ──
+
+func pidFilePath() string {
+	return filepath.Join(configDir(), "pid")
+}
+
+func isAlreadyRunning() bool {
+	raw, err := os.ReadFile(pidFilePath())
+	if err != nil {
+		return false
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(raw)))
+	if err != nil {
+		return false
+	}
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		return false
+	}
+	// Signal 0 checks if the process exists without killing it
+	return proc.Signal(syscall.Signal(0)) == nil
+}
+
+func writePidFile() {
+	os.MkdirAll(configDir(), 0755)
+	os.WriteFile(pidFilePath(), []byte(strconv.Itoa(os.Getpid())), 0644)
+}
+
+func removePidFile() {
+	os.Remove(pidFilePath())
+}
+
 // ── Entry point ──
 
 const envDaemon = "CLAUDE_USAGE_BAR_DAEMON"
@@ -70,8 +104,7 @@ func main() {
 			runUninstall()
 			return
 		case "--foreground":
-			ensureSetup()
-			systray.Run(onReady, onExit)
+			startWidget()
 			return
 		case "-h", "--help", "help":
 			printHelp()
@@ -81,8 +114,13 @@ func main() {
 
 	// Already running as daemon child — start the widget
 	if os.Getenv(envDaemon) == "1" {
-		ensureSetup()
-		systray.Run(onReady, onExit)
+		startWidget()
+		return
+	}
+
+	// Check if already running
+	if isAlreadyRunning() {
+		fmt.Println("claude-usage-bar is already running.")
 		return
 	}
 
@@ -98,6 +136,16 @@ func main() {
 		os.Exit(1)
 	}
 	fmt.Println("claude-usage-bar started (pid", cmd.Process.Pid, ")")
+}
+
+func startWidget() {
+	if isAlreadyRunning() {
+		fmt.Println("claude-usage-bar is already running.")
+		return
+	}
+	writePidFile()
+	ensureSetup()
+	systray.Run(onReady, onExit)
 }
 
 func printHelp() {
@@ -343,7 +391,9 @@ func onReady() {
 	}()
 }
 
-func onExit() {}
+func onExit() {
+	removePidFile()
+}
 
 func watchFile() {
 	watcher, err := fsnotify.NewWatcher()
