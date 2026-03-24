@@ -2,14 +2,13 @@
 
 macOS menu bar widget that displays your Claude Code rate limit usage in real time.
 
-<img src="screenshot.png" width="400" alt="screenshot">
-
 ## How it works
 
 Claude Code sends rate limit data via the `statusLine` hook on every assistant message. This tool captures that data and displays it in your macOS menu bar.
 
 - **Menu bar** — shows 5h session and 7d weekly usage at a glance
 - **Dropdown** — detailed view with progress bars and reset times
+- **Recent sessions** — shows last 5 sessions; click to copy `claude --resume` command
 - **Auto-refresh** — updates every time you chat with Claude Code
 - **Inactive state** — shows ⏸ when Claude Code hasn't been used for 10+ minutes
 

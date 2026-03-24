@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -42,6 +43,20 @@ type StatusLineInput struct {
 		DisplayName string `json:"display_name"`
 	} `json:"model"`
 	SessionID string `json:"session_id"`
+}
+
+type HistoryEntry struct {
+	Display   string `json:"display"`
+	Timestamp int64  `json:"timestamp"`
+	Project   string `json:"project"`
+	SessionID string `json:"sessionId"`
+}
+
+type RecentSession struct {
+	SessionID    string
+	Project      string
+	FirstDisplay string
+	LastActive   int64
 }
 
 // ── Paths ──
@@ -324,6 +339,113 @@ func runUninstall() {
 	fmt.Println("Done.")
 }
 
+// ── Recent sessions ──
+
+func historyFilePath() string {
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".claude", "history.jsonl")
+}
+
+func loadRecentSessions(limit int) []RecentSession {
+	f, err := os.Open(historyFilePath())
+	if err != nil {
+		return nil
+	}
+	defer f.Close()
+
+	// Track per-session: first display and last timestamp
+	type sessionAcc struct {
+		project      string
+		firstDisplay string
+		firstTS      int64
+		lastTS       int64
+	}
+	sessions := make(map[string]*sessionAcc)
+	var order []string
+
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
+	for scanner.Scan() {
+		var e HistoryEntry
+		if err := json.Unmarshal(scanner.Bytes(), &e); err != nil {
+			continue
+		}
+		if e.SessionID == "" || e.Display == "" {
+			continue
+		}
+		// Skip slash commands and short noise
+		if strings.HasPrefix(e.Display, "/") || e.Display == "exit" {
+			// Still update lastTS
+			if s, ok := sessions[e.SessionID]; ok {
+				if e.Timestamp > s.lastTS {
+					s.lastTS = e.Timestamp
+				}
+			}
+			continue
+		}
+
+		if s, ok := sessions[e.SessionID]; ok {
+			if e.Timestamp > s.lastTS {
+				s.lastTS = e.Timestamp
+			}
+		} else {
+			sessions[e.SessionID] = &sessionAcc{
+				project:      e.Project,
+				firstDisplay: e.Display,
+				firstTS:      e.Timestamp,
+				lastTS:       e.Timestamp,
+			}
+			order = append(order, e.SessionID)
+		}
+	}
+
+	// Sort by lastTS descending (most recent first)
+	// Simple selection sort for small N
+	for i := 0; i < len(order); i++ {
+		maxIdx := i
+		for j := i + 1; j < len(order); j++ {
+			if sessions[order[j]].lastTS > sessions[order[maxIdx]].lastTS {
+				maxIdx = j
+			}
+		}
+		order[i], order[maxIdx] = order[maxIdx], order[i]
+	}
+
+	var result []RecentSession
+	for _, sid := range order {
+		if len(result) >= limit {
+			break
+		}
+		s := sessions[sid]
+		result = append(result, RecentSession{
+			SessionID:    sid,
+			Project:      s.project,
+			FirstDisplay: s.firstDisplay,
+			LastActive:   s.lastTS,
+		})
+	}
+	return result
+}
+
+func projectName(fullPath string) string {
+	return filepath.Base(fullPath)
+}
+
+func truncate(s string, maxLen int) string {
+	runes := []rune(s)
+	if len(runes) <= maxLen {
+		return s
+	}
+	return string(runes[:maxLen-1]) + "…"
+}
+
+func copyResumeCommand(sessionID, project string) {
+	cmd := fmt.Sprintf("cd %s && claude --resume %s", project, sessionID)
+	p := exec.Command("pbcopy")
+	p.Stdin = strings.NewReader(cmd)
+	p.Run()
+}
+
 // ── Menu bar widget ──
 
 var (
@@ -336,9 +458,15 @@ var (
 	m7dReset *systray.MenuItem
 
 	mStatus *systray.MenuItem
+
+	mSessionItems []*systray.MenuItem
 )
 
-const barWidth = 20
+const (
+	barWidth        = 20
+	maxSessions     = 5
+	sessionLabelLen = 20
+)
 
 func onReady() {
 	systray.SetTitle("[ 5h --  ·  7d -- ]")
@@ -360,6 +488,16 @@ func onReady() {
 
 	systray.AddSeparator()
 
+	// Recent sessions
+	systray.AddMenuItem("Recent Sessions", "").Disable()
+	for i := 0; i < maxSessions; i++ {
+		item := systray.AddMenuItem("", "")
+		item.Hide()
+		mSessionItems = append(mSessionItems, item)
+	}
+
+	systray.AddSeparator()
+
 	mLaunch := systray.AddMenuItem("Launch at Login", "Toggle launch at login")
 	if isLaunchAgentInstalled() {
 		mLaunch.Check()
@@ -369,6 +507,7 @@ func onReady() {
 
 	setInactive()
 	refreshUI()
+	refreshSessions()
 
 	go watchFile()
 	go periodicRefresh()
@@ -389,6 +528,35 @@ func onReady() {
 			}
 		}
 	}()
+}
+
+var currentSessions []RecentSession
+
+func refreshSessions() {
+	currentSessions = loadRecentSessions(maxSessions)
+	for i := 0; i < maxSessions; i++ {
+		if i < len(currentSessions) {
+			s := currentSessions[i]
+			proj := projectName(s.Project)
+			label := fmt.Sprintf("[%s] %s", proj, truncate(s.FirstDisplay, sessionLabelLen))
+			mSessionItems[i].SetTitle(label)
+			mSessionItems[i].SetTooltip(s.FirstDisplay)
+			mSessionItems[i].Show()
+			// Start click handler for this item
+			go handleSessionClick(i)
+		} else {
+			mSessionItems[i].Hide()
+		}
+	}
+}
+
+func handleSessionClick(idx int) {
+	<-mSessionItems[idx].ClickedCh
+	if idx < len(currentSessions) {
+		s := currentSessions[idx]
+		copyResumeCommand(s.SessionID, s.Project)
+	}
+	go handleSessionClick(idx)
 }
 
 func onExit() {
@@ -422,6 +590,7 @@ func periodicRefresh() {
 	for {
 		time.Sleep(30 * time.Second)
 		refreshUI()
+		refreshSessions()
 	}
 }
 
