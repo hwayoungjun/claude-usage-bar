@@ -2,6 +2,8 @@
 
 macOS menu bar widget that displays your Claude Code rate limit usage in real time.
 
+<img src="screenshot.png" alt="claude-usage-bar screenshot" width="300">
+
 ## How it works
 
 Claude Code sends rate limit data via the `statusLine` hook on every assistant message. This tool captures that data and displays it in your macOS menu bar.
