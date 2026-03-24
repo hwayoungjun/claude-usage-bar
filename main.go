@@ -223,6 +223,14 @@ func setupStatusLine() error {
 	home, _ := os.UserHomeDir()
 	settingsPath := filepath.Join(home, ".claude", "settings.json")
 
+	// Resolve full path to the binary
+	binPath, err := exec.LookPath(os.Args[0])
+	if err != nil {
+		binPath = os.Args[0]
+	}
+	binPath, _ = filepath.Abs(binPath)
+	command := binPath + " statusline"
+
 	// Read existing settings
 	var settings map[string]interface{}
 	raw, err := os.ReadFile(settingsPath)
@@ -236,7 +244,7 @@ func setupStatusLine() error {
 
 	// Check if already configured
 	if sl, ok := settings["statusLine"].(map[string]interface{}); ok {
-		if cmd, ok := sl["command"].(string); ok && cmd == appName+" statusline" {
+		if cmd, ok := sl["command"].(string); ok && cmd == command {
 			return nil
 		}
 	}
@@ -244,7 +252,7 @@ func setupStatusLine() error {
 	// Set statusLine
 	settings["statusLine"] = map[string]string{
 		"type":    "command",
-		"command": appName + " statusline",
+		"command": command,
 	}
 
 	// Write back
@@ -275,7 +283,7 @@ func runSetup() {
 		settingsPath := filepath.Join(home, ".claude", "settings.json")
 		fmt.Fprintln(os.Stderr, "")
 		fmt.Fprintln(os.Stderr, "Please add the following to", settingsPath, "manually:")
-		fmt.Fprintln(os.Stderr, `  "statusLine": { "type": "command", "command": "claude-usage-bar statusline" }`)
+		fmt.Fprintf(os.Stderr, "  \"statusLine\": { \"type\": \"command\", \"command\": \"%s statusline\" }\n", os.Args[0])
 		fmt.Fprintln(os.Stderr, "")
 		fmt.Fprintln(os.Stderr, "If you see 'operation not permitted', check macOS Privacy & Security > Full Disk Access.")
 		os.Exit(1)
