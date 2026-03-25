@@ -2,14 +2,29 @@ package main
 
 import (
 	"bufio"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
 	"io"
+	"math"
+	"math/big"
+	"net"
+	"net/http"
+	"net/http/httputil"
+	"net/url"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -112,6 +127,9 @@ func main() {
 		case "statusline":
 			runStatusLine()
 			return
+		case "wrap":
+			runWrap(os.Args[2:])
+			return
 		case "setup":
 			runSetup()
 			return
@@ -123,6 +141,18 @@ func main() {
 			return
 		case "-h", "--help", "help":
 			printHelp()
+			return
+		default:
+			// Process wrapper mode (claudeProcessWrapper)
+			args := os.Args[1:]
+			if isExecutablePath(args[0]) {
+				// Normal wrapper call: claude-usage-bar /path/to/claude [args...]
+				runWrap(args)
+			} else {
+				// Extension called with flags directly: claude-usage-bar --auth-status
+				// Prepend the real claude binary path
+				runWrap(append([]string{findClaudeBinary()}, args...))
+			}
 			return
 		}
 	}
@@ -169,10 +199,40 @@ func printHelp() {
 Usage:
   %s              Launch the menu bar widget (backgrounds automatically)
   %s --foreground Launch in foreground (for debugging)
-  %s statusline   StatusLine handler (used by Claude Code)
-  %s setup        Auto-configure ~/.claude/settings.json
+  %s statusline   StatusLine handler (used by Claude Code CLI)
+  %s wrap <cmd>   Process wrapper (used by VS Code extensions)
+  %s setup        Auto-configure Claude Code CLI and VS Code extensions
   %s uninstall    Remove all config, LaunchAgent, and statusLine settings
-`, appName, appName, appName, appName, appName, appName)
+`, appName, appName, appName, appName, appName, appName, appName)
+}
+
+func isExecutablePath(path string) bool {
+	info, err := os.Stat(path)
+	if err != nil {
+		return false
+	}
+	return !info.IsDir() && info.Mode()&0111 != 0
+}
+
+func findClaudeBinary() string {
+	ourPath := stableBinPath()
+	// Search PATH for "claude" binary, excluding ourselves
+	for _, dir := range strings.Split(os.Getenv("PATH"), ":") {
+		candidate := filepath.Join(dir, "claude")
+		abs, err := filepath.Abs(candidate)
+		if err != nil {
+			continue
+		}
+		if abs == ourPath {
+			continue
+		}
+		if isExecutablePath(abs) {
+			return abs
+		}
+	}
+	// Fallback: standard location
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".local", "bin", "claude")
 }
 
 // ── StatusLine subcommand ──
@@ -214,6 +274,172 @@ func runStatusLine() {
 	os.WriteFile(usageFilePath(), out, 0644)
 
 	fmt.Println("")
+}
+
+// ── Wrap subcommand (process wrapper for VS Code extensions) ──
+
+func runWrap(args []string) {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "usage: claude-usage-bar wrap <command> [args...]")
+		os.Exit(1)
+	}
+
+	// Start local reverse proxy to intercept rate limit headers
+	proxyPort, proxyErr := startRateLimitProxy()
+
+	cmd := exec.Command(args[0], args[1:]...)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+
+	// Inject proxy env vars into child process
+	env := os.Environ()
+	if proxyErr == nil && proxyPort > 0 {
+		env = setEnv(env, "ANTHROPIC_BASE_URL", fmt.Sprintf("https://127.0.0.1:%d", proxyPort))
+		env = setEnv(env, "NODE_TLS_REJECT_UNAUTHORIZED", "0")
+	}
+	cmd.Env = env
+
+	if err := cmd.Start(); err != nil {
+		fmt.Fprintln(os.Stderr, "wrap: start:", err)
+		os.Exit(1)
+	}
+
+	// Forward signals to child process
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT, syscall.SIGHUP)
+	go func() {
+		for sig := range sigCh {
+			cmd.Process.Signal(sig)
+		}
+	}()
+
+	cmd.Wait()
+	if cmd.ProcessState != nil {
+		os.Exit(cmd.ProcessState.ExitCode())
+	}
+}
+
+// setEnv replaces or appends an environment variable.
+func setEnv(env []string, key, value string) []string {
+	prefix := key + "="
+	for i, e := range env {
+		if strings.HasPrefix(e, prefix) {
+			env[i] = prefix + value
+			return env
+		}
+	}
+	return append(env, prefix+value)
+}
+
+// ── Rate limit reverse proxy ──
+
+var proxyUsageMu sync.Mutex
+
+func startRateLimitProxy() (int, error) {
+	cert, err := generateSelfSignedCert()
+	if err != nil {
+		return 0, fmt.Errorf("cert: %w", err)
+	}
+
+	target, _ := url.Parse("https://api.anthropic.com")
+	proxy := httputil.NewSingleHostReverseProxy(target)
+	proxy.FlushInterval = -1 // Flush immediately for SSE streaming
+
+	// Fix Host header for upstream
+	origDirector := proxy.Director
+	proxy.Director = func(req *http.Request) {
+		origDirector(req)
+		req.Host = target.Host
+	}
+
+	// Extract rate limit headers from responses
+	proxy.ModifyResponse = func(resp *http.Response) error {
+		writeRateLimitsFromHeaders(resp.Header)
+		return nil
+	}
+
+	tlsConfig := &tls.Config{Certificates: []tls.Certificate{cert}}
+	listener, err := tls.Listen("tcp", "127.0.0.1:0", tlsConfig)
+	if err != nil {
+		return 0, fmt.Errorf("listen: %w", err)
+	}
+
+	port := listener.Addr().(*net.TCPAddr).Port
+	go http.Serve(listener, proxy)
+	return port, nil
+}
+
+func writeRateLimitsFromHeaders(h http.Header) {
+	util5h := h.Get("anthropic-ratelimit-unified-5h-utilization")
+	reset5h := h.Get("anthropic-ratelimit-unified-5h-reset")
+	util7d := h.Get("anthropic-ratelimit-unified-7d-utilization")
+	reset7d := h.Get("anthropic-ratelimit-unified-7d-reset")
+
+	if util5h == "" && util7d == "" {
+		return
+	}
+
+	proxyUsageMu.Lock()
+	defer proxyUsageMu.Unlock()
+
+	var data UsageData
+	if existing, err := loadUsage(); err == nil {
+		data = *existing
+	}
+	data.UpdatedAt = time.Now().Unix()
+
+	if v, err := strconv.ParseFloat(util5h, 64); err == nil {
+		pct := math.Round(v * 10000) / 100
+		data.FiveHour.UsedPercentage = &pct
+	}
+	if v, err := strconv.ParseInt(reset5h, 10, 64); err == nil {
+		data.FiveHour.ResetsAt = &v
+	}
+	if v, err := strconv.ParseFloat(util7d, 64); err == nil {
+		pct := math.Round(v * 10000) / 100
+		data.SevenDay.UsedPercentage = &pct
+	}
+	if v, err := strconv.ParseInt(reset7d, 10, 64); err == nil {
+		data.SevenDay.ResetsAt = &v
+	}
+
+	dir := configDir()
+	os.MkdirAll(dir, 0755)
+	out, _ := json.Marshal(data)
+	os.WriteFile(usageFilePath(), out, 0644)
+}
+
+func generateSelfSignedCert() (tls.Certificate, error) {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return tls.Certificate{}, err
+	}
+
+	template := x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject:      pkix.Name{Organization: []string{appName}},
+		NotBefore:    time.Now(),
+		NotAfter:     time.Now().Add(24 * 365 * time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		IPAddresses:  []net.IP{net.ParseIP("127.0.0.1")},
+		DNSNames:     []string{"localhost"},
+	}
+
+	certDER, err := x509.CreateCertificate(rand.Reader, &template, &template, &key.PublicKey, key)
+	if err != nil {
+		return tls.Certificate{}, err
+	}
+
+	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER})
+	keyDER, err := x509.MarshalECPrivateKey(key)
+	if err != nil {
+		return tls.Certificate{}, err
+	}
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
+
+	return tls.X509KeyPair(certPEM, keyPEM)
 }
 
 // ── Setup ──
@@ -268,11 +494,60 @@ func setupStatusLine() error {
 	return nil
 }
 
+// setupProcessWrapper configures claudeCode.claudeProcessWrapper in VS Code settings.
+func setupProcessWrapper() []string {
+	home, _ := os.UserHomeDir()
+	binPath := stableBinPath()
+
+	// VS Code variants and their settings paths
+	editors := []struct {
+		name string
+		path string
+	}{
+		{"VS Code", filepath.Join(home, "Library", "Application Support", "Code", "User", "settings.json")},
+		{"Cursor", filepath.Join(home, "Library", "Application Support", "Cursor", "User", "settings.json")},
+		{"Antigravity", filepath.Join(home, "Library", "Application Support", "Antigravity", "User", "settings.json")},
+	}
+
+	var configured []string
+	for _, editor := range editors {
+		// Skip if the editor's User directory doesn't exist (not installed)
+		if _, err := os.Stat(filepath.Dir(editor.path)); os.IsNotExist(err) {
+			continue
+		}
+
+		var settings map[string]interface{}
+		raw, err := os.ReadFile(editor.path)
+		if err != nil {
+			settings = make(map[string]interface{})
+		} else {
+			if err := json.Unmarshal(raw, &settings); err != nil {
+				continue
+			}
+		}
+
+		// Check if already configured
+		if v, ok := settings["claudeCode.claudeProcessWrapper"].(string); ok && v == binPath {
+			configured = append(configured, editor.name)
+			continue
+		}
+
+		settings["claudeCode.claudeProcessWrapper"] = binPath
+		out, _ := json.MarshalIndent(settings, "", "  ")
+		if err := os.WriteFile(editor.path, out, 0644); err != nil {
+			continue
+		}
+		configured = append(configured, editor.name)
+	}
+	return configured
+}
+
 // ensureSetup runs setup silently on every app launch.
 func ensureSetup() {
 	if err := setupStatusLine(); err != nil {
 		fmt.Fprintln(os.Stderr, "Auto-setup failed:", err)
 	}
+	setupProcessWrapper()
 }
 
 // runSetup is the CLI entrypoint for `claude-usage-bar setup`.
@@ -290,6 +565,11 @@ func runSetup() {
 	}
 	home, _ := os.UserHomeDir()
 	fmt.Println("✓ Configured statusLine in", filepath.Join(home, ".claude", "settings.json"))
+
+	editors := setupProcessWrapper()
+	if len(editors) > 0 {
+		fmt.Println("✓ Configured processWrapper for", strings.Join(editors, ", "))
+	}
 }
 
 // ── Uninstall subcommand ──
@@ -332,7 +612,30 @@ func runUninstall() {
 		fmt.Println("  - Settings file not found (skipped)")
 	}
 
-	// 3. Remove config directory
+	// 3. Remove claudeProcessWrapper from VS Code settings
+	for _, editor := range []struct {
+		name string
+		path string
+	}{
+		{"VS Code", filepath.Join(home, "Library", "Application Support", "Code", "User", "settings.json")},
+		{"Cursor", filepath.Join(home, "Library", "Application Support", "Cursor", "User", "settings.json")},
+		{"Antigravity", filepath.Join(home, "Library", "Application Support", "Antigravity", "User", "settings.json")},
+	} {
+		if raw, err := os.ReadFile(editor.path); err == nil {
+			var settings map[string]interface{}
+			if err := json.Unmarshal(raw, &settings); err == nil {
+				if v, ok := settings["claudeCode.claudeProcessWrapper"].(string); ok && strings.Contains(v, appName) {
+					delete(settings, "claudeCode.claudeProcessWrapper")
+					out, _ := json.MarshalIndent(settings, "", "  ")
+					if err := os.WriteFile(editor.path, out, 0644); err == nil {
+						fmt.Println("  ✓ Removed processWrapper from", editor.name)
+					}
+				}
+			}
+		}
+	}
+
+	// 4. Remove config directory
 	cfgDir := configDir()
 	if _, err := os.Stat(cfgDir); err == nil {
 		if err := os.RemoveAll(cfgDir); err != nil {
