@@ -285,7 +285,7 @@ func runWrap(args []string) {
 	}
 
 	// Start local reverse proxy to intercept rate limit headers
-	proxyPort, proxyErr := startRateLimitProxy()
+	proxyResult, proxyErr := startRateLimitProxy()
 
 	cmd := exec.Command(args[0], args[1:]...)
 	cmd.Stdin = os.Stdin
@@ -294,11 +294,16 @@ func runWrap(args []string) {
 
 	// Inject proxy env vars into child process
 	env := os.Environ()
-	if proxyErr == nil && proxyPort > 0 {
-		env = setEnv(env, "ANTHROPIC_BASE_URL", fmt.Sprintf("https://127.0.0.1:%d", proxyPort))
-		env = setEnv(env, "NODE_TLS_REJECT_UNAUTHORIZED", "0")
+	if proxyErr == nil && proxyResult != nil {
+		env = setEnv(env, "ANTHROPIC_BASE_URL", fmt.Sprintf("https://127.0.0.1:%d", proxyResult.port))
+		env = setEnv(env, "NODE_EXTRA_CA_CERTS", proxyResult.certFile)
 	}
 	cmd.Env = env
+
+	// Clean up temp cert file on exit
+	if proxyResult != nil && proxyResult.certFile != "" {
+		defer os.Remove(proxyResult.certFile)
+	}
 
 	if err := cmd.Start(); err != nil {
 		fmt.Fprintln(os.Stderr, "wrap: start:", err)
@@ -336,11 +341,28 @@ func setEnv(env []string, key, value string) []string {
 
 var proxyUsageMu sync.Mutex
 
-func startRateLimitProxy() (int, error) {
-	cert, err := generateSelfSignedCert()
+// proxyResult holds the proxy startup result including the CA cert path for NODE_EXTRA_CA_CERTS.
+type proxyResult struct {
+	port     int
+	certFile string // temp file with PEM-encoded CA cert
+}
+
+func startRateLimitProxy() (*proxyResult, error) {
+	cert, certPEM, err := generateSelfSignedCert()
 	if err != nil {
-		return 0, fmt.Errorf("cert: %w", err)
+		return nil, fmt.Errorf("cert: %w", err)
 	}
+
+	// Write CA cert to temp file for NODE_EXTRA_CA_CERTS
+	certFile, err := os.CreateTemp("", "claude-usage-bar-ca-*.pem")
+	if err != nil {
+		return nil, fmt.Errorf("temp cert: %w", err)
+	}
+	if _, err := certFile.Write(certPEM); err != nil {
+		os.Remove(certFile.Name())
+		return nil, fmt.Errorf("write cert: %w", err)
+	}
+	certFile.Close()
 
 	target, _ := url.Parse("https://api.anthropic.com")
 	proxy := httputil.NewSingleHostReverseProxy(target)
@@ -362,12 +384,13 @@ func startRateLimitProxy() (int, error) {
 	tlsConfig := &tls.Config{Certificates: []tls.Certificate{cert}}
 	listener, err := tls.Listen("tcp", "127.0.0.1:0", tlsConfig)
 	if err != nil {
-		return 0, fmt.Errorf("listen: %w", err)
+		os.Remove(certFile.Name())
+		return nil, fmt.Errorf("listen: %w", err)
 	}
 
 	port := listener.Addr().(*net.TCPAddr).Port
 	go http.Serve(listener, proxy)
-	return port, nil
+	return &proxyResult{port: port, certFile: certFile.Name()}, nil
 }
 
 func writeRateLimitsFromHeaders(h http.Header) {
@@ -410,36 +433,42 @@ func writeRateLimitsFromHeaders(h http.Header) {
 	os.WriteFile(usageFilePath(), out, 0644)
 }
 
-func generateSelfSignedCert() (tls.Certificate, error) {
+func generateSelfSignedCert() (tls.Certificate, []byte, error) {
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
-		return tls.Certificate{}, err
+		return tls.Certificate{}, nil, err
 	}
 
 	template := x509.Certificate{
-		SerialNumber: big.NewInt(1),
-		Subject:      pkix.Name{Organization: []string{appName}},
-		NotBefore:    time.Now(),
-		NotAfter:     time.Now().Add(24 * 365 * time.Hour),
-		KeyUsage:     x509.KeyUsageDigitalSignature,
-		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
-		IPAddresses:  []net.IP{net.ParseIP("127.0.0.1")},
-		DNSNames:     []string{"localhost"},
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{Organization: []string{appName}},
+		NotBefore:             time.Now(),
+		NotAfter:              time.Now().Add(24 * 365 * time.Hour),
+		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		BasicConstraintsValid: true,
+		IsCA:                  true,
+		IPAddresses:           []net.IP{net.ParseIP("127.0.0.1")},
+		DNSNames:              []string{"localhost"},
 	}
 
 	certDER, err := x509.CreateCertificate(rand.Reader, &template, &template, &key.PublicKey, key)
 	if err != nil {
-		return tls.Certificate{}, err
+		return tls.Certificate{}, nil, err
 	}
 
 	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER})
 	keyDER, err := x509.MarshalECPrivateKey(key)
 	if err != nil {
-		return tls.Certificate{}, err
+		return tls.Certificate{}, nil, err
 	}
 	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
 
-	return tls.X509KeyPair(certPEM, keyPEM)
+	tlsCert, err := tls.X509KeyPair(certPEM, keyPEM)
+	if err != nil {
+		return tls.Certificate{}, nil, err
+	}
+	return tlsCert, certPEM, nil
 }
 
 // ── Setup ──
