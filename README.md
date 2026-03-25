@@ -13,6 +13,7 @@ Claude Code sends rate limit data via the `statusLine` hook on every assistant m
 - **Recent sessions** — shows last 5 sessions; click to copy `claude --resume` command
 - **Auto-refresh** — updates every time you chat with Claude Code
 - **Inactive state** — shows ⏸ when Claude Code hasn't been used for 10+ minutes
+- **VS Code / Cursor support** — works with IDE extensions via process wrapper
 
 ## Install
 
@@ -62,6 +63,8 @@ This automatically removes the LaunchAgent, statusLine config, and app data.
 
 ## How data flows
 
+### Terminal (Claude Code CLI)
+
 ```
 Claude Code ──stdin──▶ claude-usage-bar statusline ──▶ ~/.config/claude-usage-bar/usage.json
                                                               │
@@ -72,6 +75,28 @@ Claude Code ──stdin──▶ claude-usage-bar statusline ──▶ ~/.config
 1. Claude Code calls `claude-usage-bar statusline` after each assistant message
 2. The statusline subcommand parses rate limit data from stdin and writes to `usage.json`
 3. The menu bar widget watches `usage.json` via fsnotify and updates instantly
+
+### VS Code / Cursor (IDE extensions)
+
+```
+IDE Extension ──▶ claude-usage-bar wrap claude [args...]
+                        │
+                        ├── Start local HTTPS proxy (random port)
+                        ├── Inject ANTHROPIC_BASE_URL=https://127.0.0.1:{port}
+                        └── Run claude with modified env
+                                │
+                                ▼
+                  API requests hit local proxy ──▶ api.anthropic.com
+                        │
+                        ├── Extract rate limit headers
+                        └── Write to usage.json ──▶ menu bar updates
+```
+
+1. IDE launches Claude via `claude-usage-bar wrap` (configured as `claudeProcessWrapper`)
+2. A local HTTPS reverse proxy intercepts API responses and extracts rate limit headers
+3. Rate limit data is written to `usage.json` — the menu bar updates in real time
+
+Setup is automatic — VS Code, Cursor, and Antigravity settings are configured on install and every app launch.
 
 ## License
 
