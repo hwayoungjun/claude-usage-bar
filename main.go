@@ -1343,7 +1343,8 @@ func onReady() {
 	systray.AddSeparator()
 
 	mStatus = systray.AddMenuItem("", "")
-	mSinceDate = systray.AddMenuItem("", "Since: all time  (click to set)")
+	mSinceDate = systray.AddMenuItem("Since: all time  (click to set)", "")
+	updateSinceDateMenuItem()
 
 	systray.AddSeparator()
 
