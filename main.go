@@ -202,7 +202,13 @@ func startWidget() {
 		return
 	}
 	writePidFile()
+	port := startPersistentProxy()
 	ensureSetup()
+	if port > 0 {
+		if err := setupProxyEnv(port); err != nil {
+			fmt.Fprintln(os.Stderr, "Proxy env setup failed:", err)
+		}
+	}
 	systray.Run(onReady, onExit)
 }
 
@@ -359,6 +365,103 @@ func setEnv(env []string, key, value string) []string {
 		}
 	}
 	return append(env, prefix+value)
+}
+
+// ── Persistent HTTP proxy (CLI mode) ──
+
+func proxyPortFilePath() string {
+	return filepath.Join(configDir(), "proxy-port")
+}
+
+func loadSavedProxyPort() int {
+	raw, err := os.ReadFile(proxyPortFilePath())
+	if err != nil {
+		return 0
+	}
+	port, err := strconv.Atoi(strings.TrimSpace(string(raw)))
+	if err != nil {
+		return 0
+	}
+	return port
+}
+
+// startPersistentProxy starts an HTTP proxy that forwards to api.anthropic.com.
+// Listening side is plain HTTP (localhost only) so no TLS cert is needed.
+// Claude Code is configured to use it via ANTHROPIC_BASE_URL in settings.json.
+func startPersistentProxy() int {
+	port := loadSavedProxyPort()
+	if port == 0 {
+		port = 18765
+	}
+
+	listener, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+	if err != nil {
+		// Saved port is busy — try a random free port
+		listener, err = net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			return 0
+		}
+	}
+	port = listener.Addr().(*net.TCPAddr).Port
+
+	os.MkdirAll(configDir(), 0755)
+	os.WriteFile(proxyPortFilePath(), []byte(strconv.Itoa(port)), 0644)
+
+	target, _ := url.Parse("https://api.anthropic.com")
+	proxy := httputil.NewSingleHostReverseProxy(target)
+	proxy.FlushInterval = -1
+
+	origDirector := proxy.Director
+	proxy.Director = func(req *http.Request) {
+		origDirector(req)
+		req.Host = target.Host
+		req.URL.Scheme = "https"
+	}
+	proxy.ModifyResponse = func(resp *http.Response) error {
+		writeRateLimitsFromHeaders(resp.Header)
+		return nil
+	}
+
+	go http.Serve(listener, proxy)
+	return port
+}
+
+// setupProxyEnv writes ANTHROPIC_BASE_URL to ~/.claude/settings.json env block.
+func setupProxyEnv(port int) error {
+	home, _ := os.UserHomeDir()
+	settingsPath := filepath.Join(home, ".claude", "settings.json")
+
+	var settings map[string]interface{}
+	raw, err := os.ReadFile(settingsPath)
+	if err != nil {
+		settings = make(map[string]interface{})
+	} else {
+		if err := json.Unmarshal(raw, &settings); err != nil {
+			return fmt.Errorf("error parsing %s: %v", settingsPath, err)
+		}
+	}
+
+	baseURL := fmt.Sprintf("http://127.0.0.1:%d", port)
+
+	// Check if already configured correctly
+	if envMap, ok := settings["env"].(map[string]interface{}); ok {
+		if v, ok := envMap["ANTHROPIC_BASE_URL"].(string); ok && v == baseURL {
+			return nil
+		}
+	}
+
+	if settings["env"] == nil {
+		settings["env"] = make(map[string]interface{})
+	}
+	envMap := settings["env"].(map[string]interface{})
+	envMap["ANTHROPIC_BASE_URL"] = baseURL
+
+	dir := filepath.Dir(settingsPath)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return fmt.Errorf("error creating directory %s: %v", dir, err)
+	}
+	out, _ := json.MarshalIndent(settings, "", "  ")
+	return os.WriteFile(settingsPath, out, 0644)
 }
 
 // ── Rate limit reverse proxy ──
@@ -697,21 +800,34 @@ func runUninstall() {
 		fmt.Println("  - LaunchAgent not found (skipped)")
 	}
 
-	// 2. Remove statusLine from ~/.claude/settings.json
+	// 2. Remove statusLine and proxy env from ~/.claude/settings.json
 	home, _ := os.UserHomeDir()
 	settingsPath := filepath.Join(home, ".claude", "settings.json")
 	if raw, err := os.ReadFile(settingsPath); err == nil {
 		var settings map[string]interface{}
 		if err := json.Unmarshal(raw, &settings); err == nil {
+			changed := false
 			if sl, ok := settings["statusLine"].(map[string]interface{}); ok {
 				if cmd, ok := sl["command"].(string); ok && strings.Contains(cmd, appName) {
 					delete(settings, "statusLine")
-					out, _ := json.MarshalIndent(settings, "", "  ")
-					if err := os.WriteFile(settingsPath, out, 0644); err != nil {
-						fmt.Fprintf(os.Stderr, "  ✗ Failed to update %s: %v\n", settingsPath, err)
-					} else {
-						fmt.Println("  ✓ Removed statusLine from", settingsPath)
+					changed = true
+					fmt.Println("  ✓ Removed statusLine from", settingsPath)
+				}
+			}
+			if envMap, ok := settings["env"].(map[string]interface{}); ok {
+				if _, exists := envMap["ANTHROPIC_BASE_URL"]; exists {
+					delete(envMap, "ANTHROPIC_BASE_URL")
+					if len(envMap) == 0 {
+						delete(settings, "env")
 					}
+					changed = true
+					fmt.Println("  ✓ Removed ANTHROPIC_BASE_URL from", settingsPath)
+				}
+			}
+			if changed {
+				out, _ := json.MarshalIndent(settings, "", "  ")
+				if err := os.WriteFile(settingsPath, out, 0644); err != nil {
+					fmt.Fprintf(os.Stderr, "  ✗ Failed to update %s: %v\n", settingsPath, err)
 				}
 			}
 		}
