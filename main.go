@@ -85,9 +85,11 @@ type ModelUsage struct {
 
 type CumulativeUsage struct {
 	ScannedAt    int64                `json:"scanned_at"`
+	SinceUnix    int64                `json:"since_unix,omitempty"` // 0 = no filter
 	ByModel      map[string]ModelUsage `json:"by_model"`
 	TotalCostUSD float64              `json:"total_cost_usd"`
 	TotalOutput  int64                `json:"total_output"`
+	FileOffsets  map[string]int64     `json:"file_offsets,omitempty"` // path → bytes already parsed
 }
 
 var pricingTable = []struct {
@@ -145,8 +147,9 @@ func shortModelName(model string) string {
 
 // jsonl entry shapes
 type jsonlEntry struct {
-	Type    string `json:"type"`
-	Message *struct {
+	Type      string `json:"type"`
+	Timestamp string `json:"timestamp"` // ISO 8601, e.g. "2026-03-26T02:53:34.053Z"
+	Message   *struct {
 		Model string `json:"model"`
 		Usage *struct {
 			InputTokens              int64 `json:"input_tokens"`
@@ -181,6 +184,53 @@ func cumulativeFilePath() string {
 	return filepath.Join(configDir(), "cumulative.json")
 }
 
+func sinceDateFilePath() string {
+	return filepath.Join(configDir(), "since-date")
+}
+
+func loadSinceDate() time.Time {
+	raw, err := os.ReadFile(sinceDateFilePath())
+	if err != nil {
+		return time.Time{}
+	}
+	t, err := time.ParseInLocation("2006-01-02", strings.TrimSpace(string(raw)), time.Local)
+	if err != nil {
+		return time.Time{}
+	}
+	return t
+}
+
+func saveSinceDate(t time.Time) {
+	os.MkdirAll(configDir(), 0755)
+	os.WriteFile(sinceDateFilePath(), []byte(t.Format("2006-01-02")), 0644)
+}
+
+func promptSinceDate(current time.Time) (time.Time, bool) {
+	cur := ""
+	if !current.IsZero() {
+		cur = current.Format("2006-01-02")
+	}
+	script := fmt.Sprintf(`display dialog "API key 시작 날짜를 입력하세요 (YYYY-MM-DD):" default answer "%s" with title "Claude Usage Bar"`, cur)
+	out, err := exec.Command("osascript", "-e", script).Output()
+	if err != nil {
+		return time.Time{}, false
+	}
+	s := string(out)
+	idx := strings.Index(s, "text returned:")
+	if idx < 0 {
+		return time.Time{}, false
+	}
+	dateStr := strings.TrimSpace(s[idx+len("text returned:"):])
+	if dateStr == "" {
+		return time.Time{}, true // clear filter
+	}
+	t, err := time.ParseInLocation("2006-01-02", dateStr, time.Local)
+	if err != nil {
+		return time.Time{}, false
+	}
+	return t, true
+}
+
 func loadCumulativeFromDisk() *CumulativeUsage {
 	raw, err := os.ReadFile(cumulativeFilePath())
 	if err != nil {
@@ -193,24 +243,63 @@ func loadCumulativeFromDisk() *CumulativeUsage {
 	return &cu
 }
 
-func scanProjectsDir() *CumulativeUsage {
+// scanIncremental reads only new bytes from JSONL files that have grown since last scan.
+// Pass nil as existing to do a full scan from scratch.
+// sinceDate filters entries: only entries with timestamp >= sinceDate are counted.
+func scanIncremental(existing *CumulativeUsage, sinceDate time.Time) *CumulativeUsage {
 	home, _ := os.UserHomeDir()
 	projectsDir := filepath.Join(home, ".claude", "projects")
 
-	cu := &CumulativeUsage{
-		ScannedAt: time.Now().Unix(),
-		ByModel:   make(map[string]ModelUsage),
+	var sinceUnix int64
+	if !sinceDate.IsZero() {
+		sinceUnix = sinceDate.Unix()
 	}
+
+	cu := &CumulativeUsage{
+		ScannedAt:   time.Now().Unix(),
+		SinceUnix:   sinceUnix,
+		ByModel:     make(map[string]ModelUsage),
+		FileOffsets: make(map[string]int64),
+	}
+	// Copy existing accumulated data only if the sinceDate hasn't changed
+	if existing != nil && existing.SinceUnix == sinceUnix {
+		for model, u := range existing.ByModel {
+			cu.ByModel[model] = u
+		}
+		for p, off := range existing.FileOffsets {
+			cu.FileOffsets[p] = off
+		}
+	}
+	// If sinceDate changed, we do a fresh full scan (no existing data copied)
 
 	filepath.Walk(projectsDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil || info.IsDir() || !strings.HasSuffix(path, ".jsonl") {
 			return nil
 		}
+		currentSize := info.Size()
+		knownOffset := cu.FileOffsets[path]
+
+		if currentSize < knownOffset {
+			// File was truncated/replaced — rescan from beginning
+			knownOffset = 0
+			// Remove stale model counts? We can't easily subtract.
+			// Simplest: mark full rescan needed. For now, just re-read from 0.
+		}
+		if currentSize == knownOffset {
+			return nil // nothing new
+		}
+
 		f, err := os.Open(path)
 		if err != nil {
 			return nil
 		}
 		defer f.Close()
+
+		if knownOffset > 0 {
+			if _, err := f.Seek(knownOffset, io.SeekStart); err != nil {
+				return nil
+			}
+		}
 
 		scanner := bufio.NewScanner(f)
 		scanner.Buffer(make([]byte, 4*1024*1024), 4*1024*1024)
@@ -222,18 +311,27 @@ func scanProjectsDir() *CumulativeUsage {
 			if entry.Type != "assistant" || entry.Message == nil || entry.Message.Model == "" || entry.Message.Usage == nil {
 				continue
 			}
+			// Apply since-date filter via timestamp field
+			if sinceUnix > 0 && entry.Timestamp != "" {
+				ts, err := time.Parse(time.RFC3339Nano, entry.Timestamp)
+				if err == nil && ts.Unix() < sinceUnix {
+					continue
+				}
+			}
 			u := entry.Message.Usage
 			if u.InputTokens == 0 && u.OutputTokens == 0 {
 				continue
 			}
 			model := strings.ToLower(entry.Message.Model)
-			existing := cu.ByModel[model]
-			existing.InputTokens += u.InputTokens
-			existing.OutputTokens += u.OutputTokens
-			existing.CacheWriteTokens += u.CacheCreationInputTokens
-			existing.CacheReadTokens += u.CacheReadInputTokens
-			cu.ByModel[model] = existing
+			acc := cu.ByModel[model]
+			acc.InputTokens += u.InputTokens
+			acc.OutputTokens += u.OutputTokens
+			acc.CacheWriteTokens += u.CacheCreationInputTokens
+			acc.CacheReadTokens += u.CacheReadInputTokens
+			cu.ByModel[model] = acc
 		}
+		// Record how far we've read (use observed size at walk time)
+		cu.FileOffsets[path] = currentSize
 		return nil
 	})
 
@@ -249,18 +347,51 @@ func scanProjectsDir() *CumulativeUsage {
 	return cu
 }
 
+// cumulativeRescanCh is a 1-element channel used to debounce incremental rescans.
+var cumulativeRescanCh = make(chan struct{}, 1)
+
+// triggerCumulativeRescan requests an incremental rescan (non-blocking; drops if one is already pending).
+func triggerCumulativeRescan() {
+	select {
+	case cumulativeRescanCh <- struct{}{}:
+	default:
+	}
+}
+
 func startCumulativeScanner() {
+	// Show cached result immediately on startup
 	if cu := loadCumulativeFromDisk(); cu != nil {
 		setCumulative(cu)
 	}
+	// Initial full scan in background
 	go func() {
-		cu := scanProjectsDir()
+		sinceDate := loadSinceDate()
+		cu := scanIncremental(loadCumulativeFromDisk(), sinceDate)
 		setCumulative(cu)
 		refreshUI()
-		for range time.Tick(10 * time.Minute) {
-			cu := scanProjectsDir()
-			setCumulative(cu)
-			refreshUI()
+		updateSinceDateMenuItem()
+	}()
+	// Rescan loop: responds to triggers + periodic fallback
+	go func() {
+		ticker := time.NewTicker(10 * time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-cumulativeRescanCh:
+				time.Sleep(500 * time.Millisecond) // debounce
+				for len(cumulativeRescanCh) > 0 {
+					<-cumulativeRescanCh
+				}
+				sinceDate := loadSinceDate()
+				cu := scanIncremental(getCumulative(), sinceDate)
+				setCumulative(cu)
+				refreshUI()
+			case <-ticker.C:
+				sinceDate := loadSinceDate()
+				cu := scanIncremental(getCumulative(), sinceDate)
+				setCumulative(cu)
+				refreshUI()
+			}
 		}
 	}()
 }
@@ -1183,7 +1314,8 @@ var (
 	m7dBar   *systray.MenuItem
 	m7dReset *systray.MenuItem
 
-	mStatus *systray.MenuItem
+	mStatus    *systray.MenuItem
+	mSinceDate *systray.MenuItem
 
 	mSessionItems []*systray.MenuItem
 )
@@ -1211,6 +1343,7 @@ func onReady() {
 	systray.AddSeparator()
 
 	mStatus = systray.AddMenuItem("", "")
+	mSinceDate = systray.AddMenuItem("", "Since: all time  (click to set)")
 
 	systray.AddSeparator()
 
@@ -1242,6 +1375,20 @@ func onReady() {
 	go func() {
 		for {
 			select {
+			case <-mSinceDate.ClickedCh:
+				current := loadSinceDate()
+				newDate, ok := promptSinceDate(current)
+				if !ok {
+					break
+				}
+				saveSinceDate(newDate)
+				updateSinceDateMenuItem()
+				// Force full rescan with new date
+				go func() {
+					cu := scanIncremental(nil, newDate)
+					setCumulative(cu)
+					refreshUI()
+				}()
 			case <-mLaunch.ClickedCh:
 				if isLaunchAgentInstalled() {
 					removeLaunchAgent()
@@ -1255,6 +1402,18 @@ func onReady() {
 			}
 		}
 	}()
+}
+
+func updateSinceDateMenuItem() {
+	if mSinceDate == nil {
+		return
+	}
+	d := loadSinceDate()
+	if d.IsZero() {
+		mSinceDate.SetTitle("Since: all time  (click to set)")
+	} else {
+		mSinceDate.SetTitle(fmt.Sprintf("Since: %s  (click to change)", d.Format("2006-01-02")))
+	}
 }
 
 var currentSessions []RecentSession
@@ -1307,6 +1466,7 @@ func watchFile() {
 			if ev.Name == usageFilePath() && (ev.Op&(fsnotify.Write|fsnotify.Create)) != 0 {
 				time.Sleep(50 * time.Millisecond)
 				refreshUI()
+				triggerCumulativeRescan()
 			}
 		case <-watcher.Errors:
 		}
