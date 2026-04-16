@@ -22,6 +22,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -71,6 +72,197 @@ type StatusLineInput struct {
 		DisplayName string `json:"display_name"`
 	} `json:"model"`
 	SessionID string `json:"session_id"`
+}
+
+// ── Cumulative usage (parsed from ~/.claude/projects/**/*.jsonl) ──
+
+type ModelUsage struct {
+	InputTokens      int64 `json:"input_tokens"`
+	OutputTokens     int64 `json:"output_tokens"`
+	CacheWriteTokens int64 `json:"cache_write_tokens"`
+	CacheReadTokens  int64 `json:"cache_read_tokens"`
+}
+
+type CumulativeUsage struct {
+	ScannedAt    int64                `json:"scanned_at"`
+	ByModel      map[string]ModelUsage `json:"by_model"`
+	TotalCostUSD float64              `json:"total_cost_usd"`
+	TotalOutput  int64                `json:"total_output"`
+}
+
+var pricingTable = []struct {
+	prefix         string
+	inputPerM      float64
+	outputPerM     float64
+	cacheWritePerM float64
+	cacheReadPerM  float64
+}{
+	{"claude-opus-4", 15.0, 75.0, 18.75, 1.50},
+	{"claude-3-opus", 15.0, 75.0, 18.75, 1.50},
+	{"claude-sonnet-4", 3.0, 15.0, 3.75, 0.30},
+	{"claude-3-7-sonnet", 3.0, 15.0, 3.75, 0.30},
+	{"claude-3-5-sonnet", 3.0, 15.0, 3.75, 0.30},
+	{"claude-3-sonnet", 3.0, 15.0, 3.75, 0.30},
+	{"claude-haiku-4", 0.80, 4.0, 1.00, 0.08},
+	{"claude-3-5-haiku", 0.80, 4.0, 1.00, 0.08},
+	{"claude-3-haiku", 0.25, 1.25, 0.30, 0.03},
+}
+
+func lookupPricing(model string) (inputPerM, outputPerM, cacheWritePerM, cacheReadPerM float64) {
+	m := strings.ToLower(model)
+	for _, p := range pricingTable {
+		if strings.HasPrefix(m, p.prefix) {
+			return p.inputPerM, p.outputPerM, p.cacheWritePerM, p.cacheReadPerM
+		}
+	}
+	return 3.0, 15.0, 3.75, 0.30 // default: sonnet pricing
+}
+
+func modelCostUSD(model string, u ModelUsage) float64 {
+	in, out, cw, cr := lookupPricing(model)
+	return (float64(u.InputTokens)*in +
+		float64(u.OutputTokens)*out +
+		float64(u.CacheWriteTokens)*cw +
+		float64(u.CacheReadTokens)*cr) / 1_000_000
+}
+
+func shortModelName(model string) string {
+	m := strings.ToLower(model)
+	switch {
+	case strings.Contains(m, "opus"):
+		return "opus"
+	case strings.Contains(m, "sonnet"):
+		return "sonnet"
+	case strings.Contains(m, "haiku"):
+		return "haiku"
+	default:
+		if len(model) > 12 {
+			return model[:12]
+		}
+		return model
+	}
+}
+
+// jsonl entry shapes
+type jsonlEntry struct {
+	Type    string `json:"type"`
+	Message *struct {
+		Model string `json:"model"`
+		Usage *struct {
+			InputTokens              int64 `json:"input_tokens"`
+			OutputTokens             int64 `json:"output_tokens"`
+			CacheCreationInputTokens int64 `json:"cache_creation_input_tokens"`
+			CacheReadInputTokens     int64 `json:"cache_read_input_tokens"`
+		} `json:"usage"`
+	} `json:"message"`
+}
+
+var (
+	cumulativeMu     sync.RWMutex
+	latestCumulative *CumulativeUsage
+)
+
+func getCumulative() *CumulativeUsage {
+	cumulativeMu.RLock()
+	defer cumulativeMu.RUnlock()
+	return latestCumulative
+}
+
+func setCumulative(cu *CumulativeUsage) {
+	cumulativeMu.Lock()
+	latestCumulative = cu
+	cumulativeMu.Unlock()
+	out, _ := json.Marshal(cu)
+	os.MkdirAll(configDir(), 0755)
+	os.WriteFile(cumulativeFilePath(), out, 0644)
+}
+
+func cumulativeFilePath() string {
+	return filepath.Join(configDir(), "cumulative.json")
+}
+
+func loadCumulativeFromDisk() *CumulativeUsage {
+	raw, err := os.ReadFile(cumulativeFilePath())
+	if err != nil {
+		return nil
+	}
+	var cu CumulativeUsage
+	if err := json.Unmarshal(raw, &cu); err != nil {
+		return nil
+	}
+	return &cu
+}
+
+func scanProjectsDir() *CumulativeUsage {
+	home, _ := os.UserHomeDir()
+	projectsDir := filepath.Join(home, ".claude", "projects")
+
+	cu := &CumulativeUsage{
+		ScannedAt: time.Now().Unix(),
+		ByModel:   make(map[string]ModelUsage),
+	}
+
+	filepath.Walk(projectsDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() || !strings.HasSuffix(path, ".jsonl") {
+			return nil
+		}
+		f, err := os.Open(path)
+		if err != nil {
+			return nil
+		}
+		defer f.Close()
+
+		scanner := bufio.NewScanner(f)
+		scanner.Buffer(make([]byte, 4*1024*1024), 4*1024*1024)
+		for scanner.Scan() {
+			var entry jsonlEntry
+			if err := json.Unmarshal(scanner.Bytes(), &entry); err != nil {
+				continue
+			}
+			if entry.Type != "assistant" || entry.Message == nil || entry.Message.Model == "" || entry.Message.Usage == nil {
+				continue
+			}
+			u := entry.Message.Usage
+			if u.InputTokens == 0 && u.OutputTokens == 0 {
+				continue
+			}
+			model := strings.ToLower(entry.Message.Model)
+			existing := cu.ByModel[model]
+			existing.InputTokens += u.InputTokens
+			existing.OutputTokens += u.OutputTokens
+			existing.CacheWriteTokens += u.CacheCreationInputTokens
+			existing.CacheReadTokens += u.CacheReadInputTokens
+			cu.ByModel[model] = existing
+		}
+		return nil
+	})
+
+	var totalCost float64
+	var totalOutput int64
+	for model, u := range cu.ByModel {
+		totalCost += modelCostUSD(model, u)
+		totalOutput += u.OutputTokens
+	}
+	cu.TotalCostUSD = totalCost
+	cu.TotalOutput = totalOutput
+
+	return cu
+}
+
+func startCumulativeScanner() {
+	if cu := loadCumulativeFromDisk(); cu != nil {
+		setCumulative(cu)
+	}
+	go func() {
+		cu := scanProjectsDir()
+		setCumulative(cu)
+		refreshUI()
+		for range time.Tick(10 * time.Minute) {
+			cu := scanProjectsDir()
+			setCumulative(cu)
+			refreshUI()
+		}
+	}()
 }
 
 type HistoryEntry struct {
@@ -1045,6 +1237,7 @@ func onReady() {
 
 	go watchFile()
 	go periodicRefresh()
+	startCumulativeScanner()
 
 	go func() {
 		for {
@@ -1167,15 +1360,54 @@ func setActivePlan(d *UsageData) {
 }
 
 func setActiveAPIKey(d *UsageData) {
-	tokUsed := tokenUsedPct(d.Tokens)
-	reqUsed := tokenUsedPct(d.Requests)
-	systray.SetTitle(fmt.Sprintf("[ tok %s  ·  req %s ]", tokUsed, reqUsed))
-	m5hLabel.SetTitle(fmt.Sprintf("Tokens        %s", tokenAbsolute(d.Tokens)))
-	m5hBar.SetTitle(barFromTokenRatio(d.Tokens))
-	m5hReset.SetTitle(fmt.Sprintf("Resets %s", tokenResetDate(d.Tokens)))
-	m7dLabel.SetTitle(fmt.Sprintf("Requests      %s", tokenAbsolute(d.Requests)))
-	m7dBar.SetTitle(barFromTokenRatio(d.Requests))
-	m7dReset.SetTitle(fmt.Sprintf("Resets %s", tokenResetDate(d.Requests)))
+	cu := getCumulative()
+	if cu == nil || cu.TotalCostUSD < 0.005 {
+		systray.SetTitle("[ scanning… ]")
+		m5hLabel.SetTitle("Scanning usage data…")
+		m5hBar.SetTitle("")
+		m5hReset.SetTitle("")
+		m7dLabel.SetTitle("")
+		m7dBar.SetTitle("")
+		m7dReset.SetTitle("")
+		return
+	}
+
+	systray.SetTitle(fmt.Sprintf("[ %s ]", fmtCost(cu.TotalCostUSD)))
+
+	// Totals row
+	var totalIn, totalOut, totalCacheR int64
+	for _, u := range cu.ByModel {
+		totalIn += u.InputTokens
+		totalOut += u.OutputTokens
+		totalCacheR += u.CacheReadTokens
+	}
+	m5hLabel.SetTitle(fmt.Sprintf("Total Cost              %s", fmtCost(cu.TotalCostUSD)))
+	m5hBar.SetTitle(fmt.Sprintf("Output %-6s  Input %-6s  Cache %s",
+		fmtTokensM(totalOut), fmtTokensM(totalIn), fmtTokensM(totalCacheR)))
+	ago := fmtAgo(time.Since(time.Unix(cu.ScannedAt, 0)))
+	m5hReset.SetTitle(fmt.Sprintf("Scanned %s", ago))
+
+	// Per-model breakdown sorted by cost
+	type entry struct {
+		name string
+		cost float64
+		out  int64
+	}
+	var entries []entry
+	for model, u := range cu.ByModel {
+		entries = append(entries, entry{shortModelName(model), modelCostUSD(model, u), u.OutputTokens})
+	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].cost > entries[j].cost })
+
+	rows := []*systray.MenuItem{m7dLabel, m7dBar, m7dReset}
+	for i, row := range rows {
+		if i < len(entries) {
+			e := entries[i]
+			row.SetTitle(fmt.Sprintf("  %-8s  %-9s  %s", e.name, fmtTokensM(e.out)+" out", fmtCost(e.cost)))
+		} else {
+			row.SetTitle("")
+		}
+	}
 }
 
 func setStale(d *UsageData, staleness time.Duration) {
@@ -1230,6 +1462,29 @@ func fmtK(n int64) string {
 		return fmt.Sprintf("%.0fk", float64(n)/1000)
 	}
 	return fmt.Sprintf("%d", n)
+}
+
+func fmtTokensM(n int64) string {
+	if n >= 1_000_000 {
+		return fmt.Sprintf("%.1fM", float64(n)/1_000_000)
+	}
+	if n >= 1000 {
+		return fmt.Sprintf("%.0fk", float64(n)/1000)
+	}
+	return fmt.Sprintf("%d", n)
+}
+
+func fmtCost(usd float64) string {
+	if usd < 0.005 {
+		return "<$0.01"
+	}
+	if usd < 10 {
+		return fmt.Sprintf("$%.2f", usd)
+	}
+	if usd < 1000 {
+		return fmt.Sprintf("$%.0f", usd)
+	}
+	return fmt.Sprintf("$%.1fk", usd/1000)
 }
 
 func tokenAbsolute(t *TokenRateInfo) string {
