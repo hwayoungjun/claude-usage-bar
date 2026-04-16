@@ -99,13 +99,21 @@ var pricingTable = []struct {
 	cacheWritePerM float64
 	cacheReadPerM  float64
 }{
+	// Opus 4.5 / 4.6: $5/$25 (must come before "claude-opus-4" catch-all)
+	{"claude-opus-4-6", 5.0, 25.0, 6.25, 0.50},
+	{"claude-opus-4-5", 5.0, 25.0, 6.25, 0.50},
+	// Opus 4 / 4.1 (deprecated): $15/$75
 	{"claude-opus-4", 15.0, 75.0, 18.75, 1.50},
 	{"claude-3-opus", 15.0, 75.0, 18.75, 1.50},
+	// Sonnet 4.x / 3.x: $3/$15
 	{"claude-sonnet-4", 3.0, 15.0, 3.75, 0.30},
 	{"claude-3-7-sonnet", 3.0, 15.0, 3.75, 0.30},
 	{"claude-3-5-sonnet", 3.0, 15.0, 3.75, 0.30},
 	{"claude-3-sonnet", 3.0, 15.0, 3.75, 0.30},
-	{"claude-haiku-4", 0.80, 4.0, 1.00, 0.08},
+	// Haiku 4.5: $1/$5 (must come before "claude-haiku-4" catch-all)
+	{"claude-haiku-4-5", 1.0, 5.0, 1.25, 0.10},
+	{"claude-haiku-4", 1.0, 5.0, 1.25, 0.10},
+	// Haiku 3.5: $0.80/$4
 	{"claude-3-5-haiku", 0.80, 4.0, 1.00, 0.08},
 	{"claude-3-haiku", 0.25, 1.25, 0.30, 0.03},
 }
