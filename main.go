@@ -1170,10 +1170,10 @@ func setActiveAPIKey(d *UsageData) {
 	tokUsed := tokenUsedPct(d.Tokens)
 	reqUsed := tokenUsedPct(d.Requests)
 	systray.SetTitle(fmt.Sprintf("[ tok %s  ·  req %s ]", tokUsed, reqUsed))
-	m5hLabel.SetTitle(fmt.Sprintf("Tokens                               %s used", tokUsed))
+	m5hLabel.SetTitle(fmt.Sprintf("Tokens        %s", tokenAbsolute(d.Tokens)))
 	m5hBar.SetTitle(barFromTokenRatio(d.Tokens))
 	m5hReset.SetTitle(fmt.Sprintf("Resets %s", tokenResetDate(d.Tokens)))
-	m7dLabel.SetTitle(fmt.Sprintf("Requests                             %s used", reqUsed))
+	m7dLabel.SetTitle(fmt.Sprintf("Requests      %s", tokenAbsolute(d.Requests)))
 	m7dBar.SetTitle(barFromTokenRatio(d.Requests))
 	m7dReset.SetTitle(fmt.Sprintf("Resets %s", tokenResetDate(d.Requests)))
 }
@@ -1223,6 +1223,21 @@ func bar(p *float64) string {
 		filled = 0
 	}
 	return strings.Repeat("█", filled) + strings.Repeat("░", barWidth-filled)
+}
+
+func fmtK(n int64) string {
+	if n >= 1000 {
+		return fmt.Sprintf("%.0fk", float64(n)/1000)
+	}
+	return fmt.Sprintf("%d", n)
+}
+
+func tokenAbsolute(t *TokenRateInfo) string {
+	if t == nil || t.Limit == 0 {
+		return "--"
+	}
+	used := t.Limit - t.Remaining
+	return fmt.Sprintf("%s / %s used  (%s remaining)", fmtK(used), fmtK(t.Limit), fmtK(t.Remaining))
 }
 
 func tokenUsedPct(t *TokenRateInfo) string {
