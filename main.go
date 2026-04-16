@@ -38,6 +38,7 @@ const appName = "claude-usage-bar"
 
 type UsageData struct {
 	UpdatedAt int64          `json:"updated_at"`
+	Mode      string         `json:"mode,omitempty"` // "plan" or "apikey"
 	FiveHour  RateInfo       `json:"five_hour"`
 	SevenDay  RateInfo       `json:"seven_day"`
 	Tokens    *TokenRateInfo `json:"tokens,omitempty"`
@@ -47,7 +48,7 @@ type UsageData struct {
 }
 
 func (d *UsageData) isAPIKeyMode() bool {
-	return d.Tokens != nil || d.Requests != nil
+	return d.Mode == "apikey" || d.Tokens != nil || d.Requests != nil
 }
 
 type RateInfo struct {
@@ -274,15 +275,20 @@ func runStatusLine() {
 		data.Model = sl.Model.DisplayName
 	}
 	if sl.RateLimits != nil {
+		data.Mode = "plan"
 		if sl.RateLimits.FiveHour != nil {
 			data.FiveHour = *sl.RateLimits.FiveHour
 		}
 		if sl.RateLimits.SevenDay != nil {
 			data.SevenDay = *sl.RateLimits.SevenDay
 		}
-		// Clear API key data when plan rate limits are present
 		data.Tokens = nil
 		data.Requests = nil
+	} else {
+		// No plan rate limits → API key mode; clear stale plan data
+		data.Mode = "apikey"
+		data.FiveHour = RateInfo{}
+		data.SevenDay = RateInfo{}
 	}
 
 	dir := configDir()
@@ -443,7 +449,7 @@ func writeRateLimitsFromHeaders(h http.Header) {
 	data.UpdatedAt = time.Now().Unix()
 
 	if hasPlanHeaders {
-		// Clear API key data when switching to plan mode
+		data.Mode = "plan"
 		data.Tokens = nil
 		data.Requests = nil
 
@@ -462,7 +468,7 @@ func writeRateLimitsFromHeaders(h http.Header) {
 			data.SevenDay.ResetsAt = &v
 		}
 	} else {
-		// Clear plan data when switching to API key mode
+		data.Mode = "apikey"
 		data.FiveHour = RateInfo{}
 		data.SevenDay = RateInfo{}
 
