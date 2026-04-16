@@ -43,6 +43,8 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
+
       - uses: actions/download-artifact@v4
 
       - name: Create Release
@@ -51,3 +53,29 @@ jobs:
           files: |
             claude-usage-bar-darwin-arm64/claude-usage-bar-darwin-arm64.tar.gz
             claude-usage-bar-darwin-amd64/claude-usage-bar-darwin-amd64.tar.gz
+
+      - name: Update Homebrew formula
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          if [ -z "$HOMEBREW_TAP_TOKEN" ]; then
+            echo "HOMEBREW_TAP_TOKEN not set, skipping formula update"
+            exit 0
+          fi
+
+          VERSION=${GITHUB_REF_NAME#v}
+          SHA256_ARM64=$(sha256sum claude-usage-bar-darwin-arm64/claude-usage-bar-darwin-arm64.tar.gz | awk '{print $1}')
+          SHA256_AMD64=$(sha256sum claude-usage-bar-darwin-amd64/claude-usage-bar-darwin-amd64.tar.gz | awk '{print $1}')
+
+          git clone https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/hwayoungjun/homebrew-tap.git
+          cp .github/scripts/update_formula.py homebrew-tap/
+          cd homebrew-tap
+
+          python3 update_formula.py "$VERSION" "$SHA256_ARM64" "$SHA256_AMD64"
+          rm update_formula.py
+
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+          git add Formula/claude-usage-bar.rb
+          git commit -m "Update claude-usage-bar to v${VERSION}"
+          git push

@@ -37,16 +37,28 @@ const appName = "claude-usage-bar"
 // ── Data types ──
 
 type UsageData struct {
-	UpdatedAt int64    `json:"updated_at"`
-	FiveHour  RateInfo `json:"five_hour"`
-	SevenDay  RateInfo `json:"seven_day"`
-	Model     string   `json:"model"`
-	SessionID string   `json:"session_id"`
+	UpdatedAt int64          `json:"updated_at"`
+	FiveHour  RateInfo       `json:"five_hour"`
+	SevenDay  RateInfo       `json:"seven_day"`
+	Tokens    *TokenRateInfo `json:"tokens,omitempty"`
+	Requests  *TokenRateInfo `json:"requests,omitempty"`
+	Model     string         `json:"model"`
+	SessionID string         `json:"session_id"`
+}
+
+func (d *UsageData) isAPIKeyMode() bool {
+	return d.Tokens != nil || d.Requests != nil
 }
 
 type RateInfo struct {
 	UsedPercentage *float64 `json:"used_percentage"`
 	ResetsAt       *int64   `json:"resets_at"`
+}
+
+type TokenRateInfo struct {
+	Limit     int64  `json:"limit"`
+	Remaining int64  `json:"remaining"`
+	ResetsAt  *int64 `json:"resets_at,omitempty"`
 }
 
 type StatusLineInput struct {
@@ -250,10 +262,13 @@ func runStatusLine() {
 		return
 	}
 
-	data := UsageData{
-		UpdatedAt: time.Now().Unix(),
-		SessionID: sl.SessionID,
+	// Merge with existing data to preserve API key token info written by proxy
+	var data UsageData
+	if existing, err := loadUsage(); err == nil {
+		data = *existing
 	}
+	data.UpdatedAt = time.Now().Unix()
+	data.SessionID = sl.SessionID
 
 	if sl.Model != nil {
 		data.Model = sl.Model.DisplayName
@@ -265,6 +280,9 @@ func runStatusLine() {
 		if sl.RateLimits.SevenDay != nil {
 			data.SevenDay = *sl.RateLimits.SevenDay
 		}
+		// Clear API key data when plan rate limits are present
+		data.Tokens = nil
+		data.Requests = nil
 	}
 
 	dir := configDir()
@@ -394,12 +412,24 @@ func startRateLimitProxy() (*proxyResult, error) {
 }
 
 func writeRateLimitsFromHeaders(h http.Header) {
+	// Pro/Team plan: unified rate limit headers
 	util5h := h.Get("anthropic-ratelimit-unified-5h-utilization")
 	reset5h := h.Get("anthropic-ratelimit-unified-5h-reset")
 	util7d := h.Get("anthropic-ratelimit-unified-7d-utilization")
 	reset7d := h.Get("anthropic-ratelimit-unified-7d-reset")
 
-	if util5h == "" && util7d == "" {
+	// API key: token/request rate limit headers
+	tokensLimitStr := h.Get("anthropic-ratelimit-tokens-limit")
+	tokensRemainingStr := h.Get("anthropic-ratelimit-tokens-remaining")
+	tokensResetStr := h.Get("anthropic-ratelimit-tokens-reset")
+	requestsLimitStr := h.Get("anthropic-ratelimit-requests-limit")
+	requestsRemainingStr := h.Get("anthropic-ratelimit-requests-remaining")
+	requestsResetStr := h.Get("anthropic-ratelimit-requests-reset")
+
+	hasPlanHeaders := util5h != "" || util7d != ""
+	hasAPIKeyHeaders := tokensLimitStr != "" || tokensRemainingStr != ""
+
+	if !hasPlanHeaders && !hasAPIKeyHeaders {
 		return
 	}
 
@@ -412,19 +442,61 @@ func writeRateLimitsFromHeaders(h http.Header) {
 	}
 	data.UpdatedAt = time.Now().Unix()
 
-	if v, err := strconv.ParseFloat(util5h, 64); err == nil {
-		pct := math.Round(v * 10000) / 100
-		data.FiveHour.UsedPercentage = &pct
-	}
-	if v, err := strconv.ParseInt(reset5h, 10, 64); err == nil {
-		data.FiveHour.ResetsAt = &v
-	}
-	if v, err := strconv.ParseFloat(util7d, 64); err == nil {
-		pct := math.Round(v * 10000) / 100
-		data.SevenDay.UsedPercentage = &pct
-	}
-	if v, err := strconv.ParseInt(reset7d, 10, 64); err == nil {
-		data.SevenDay.ResetsAt = &v
+	if hasPlanHeaders {
+		// Clear API key data when switching to plan mode
+		data.Tokens = nil
+		data.Requests = nil
+
+		if v, err := strconv.ParseFloat(util5h, 64); err == nil {
+			pct := math.Round(v * 10000) / 100
+			data.FiveHour.UsedPercentage = &pct
+		}
+		if v, err := strconv.ParseInt(reset5h, 10, 64); err == nil {
+			data.FiveHour.ResetsAt = &v
+		}
+		if v, err := strconv.ParseFloat(util7d, 64); err == nil {
+			pct := math.Round(v * 10000) / 100
+			data.SevenDay.UsedPercentage = &pct
+		}
+		if v, err := strconv.ParseInt(reset7d, 10, 64); err == nil {
+			data.SevenDay.ResetsAt = &v
+		}
+	} else {
+		// Clear plan data when switching to API key mode
+		data.FiveHour = RateInfo{}
+		data.SevenDay = RateInfo{}
+
+		if tokensLimitStr != "" || tokensRemainingStr != "" {
+			if data.Tokens == nil {
+				data.Tokens = &TokenRateInfo{}
+			}
+			if v, err := strconv.ParseInt(tokensLimitStr, 10, 64); err == nil {
+				data.Tokens.Limit = v
+			}
+			if v, err := strconv.ParseInt(tokensRemainingStr, 10, 64); err == nil {
+				data.Tokens.Remaining = v
+			}
+			if t, err := time.Parse(time.RFC3339, tokensResetStr); err == nil {
+				ts := t.Unix()
+				data.Tokens.ResetsAt = &ts
+			}
+		}
+
+		if requestsLimitStr != "" || requestsRemainingStr != "" {
+			if data.Requests == nil {
+				data.Requests = &TokenRateInfo{}
+			}
+			if v, err := strconv.ParseInt(requestsLimitStr, 10, 64); err == nil {
+				data.Requests.Limit = v
+			}
+			if v, err := strconv.ParseInt(requestsRemainingStr, 10, 64); err == nil {
+				data.Requests.Remaining = v
+			}
+			if t, err := time.Parse(time.RFC3339, requestsResetStr); err == nil {
+				ts := t.Unix()
+				data.Requests.ResetsAt = &ts
+			}
+		}
 	}
 
 	dir := configDir()
@@ -951,37 +1023,46 @@ func refreshUI() {
 }
 
 func setActive(d *UsageData) {
-	s := pct(d.FiveHour.UsedPercentage)
-	w := pct(d.SevenDay.UsedPercentage)
-
-	systray.SetTitle(fmt.Sprintf("[ 5h %s  ·  7d %s ]", s, w))
-
-	m5hLabel.SetTitle(fmt.Sprintf("5h Session                           %s used", s))
-	m5hBar.SetTitle(bar(d.FiveHour.UsedPercentage))
-	m5hReset.SetTitle(fmt.Sprintf("Resets %s", resetDate(d.FiveHour.ResetsAt)))
-
-	m7dLabel.SetTitle(fmt.Sprintf("7d All Models                        %s used", w))
-	m7dBar.SetTitle(bar(d.SevenDay.UsedPercentage))
-	m7dReset.SetTitle(fmt.Sprintf("Resets %s", resetDate(d.SevenDay.ResetsAt)))
-
+	if d.isAPIKeyMode() {
+		setActiveAPIKey(d)
+	} else {
+		setActivePlan(d)
+	}
 	ago := fmtAgo(time.Since(time.Unix(d.UpdatedAt, 0)))
 	mStatus.SetTitle(fmt.Sprintf("%s · %s", d.Model, ago))
 }
 
-func setStale(d *UsageData, staleness time.Duration) {
+func setActivePlan(d *UsageData) {
 	s := pct(d.FiveHour.UsedPercentage)
 	w := pct(d.SevenDay.UsedPercentage)
-
-	systray.SetTitle("[ ⏸ ]")
-
+	systray.SetTitle(fmt.Sprintf("[ 5h %s  ·  7d %s ]", s, w))
 	m5hLabel.SetTitle(fmt.Sprintf("5h Session                           %s used", s))
 	m5hBar.SetTitle(bar(d.FiveHour.UsedPercentage))
 	m5hReset.SetTitle(fmt.Sprintf("Resets %s", resetDate(d.FiveHour.ResetsAt)))
-
 	m7dLabel.SetTitle(fmt.Sprintf("7d All Models                        %s used", w))
 	m7dBar.SetTitle(bar(d.SevenDay.UsedPercentage))
 	m7dReset.SetTitle(fmt.Sprintf("Resets %s", resetDate(d.SevenDay.ResetsAt)))
+}
 
+func setActiveAPIKey(d *UsageData) {
+	tokUsed := tokenUsedPct(d.Tokens)
+	reqUsed := tokenUsedPct(d.Requests)
+	systray.SetTitle(fmt.Sprintf("[ tok %s  ·  req %s ]", tokUsed, reqUsed))
+	m5hLabel.SetTitle(fmt.Sprintf("Tokens                               %s used", tokUsed))
+	m5hBar.SetTitle(barFromTokenRatio(d.Tokens))
+	m5hReset.SetTitle(fmt.Sprintf("Resets %s", tokenResetDate(d.Tokens)))
+	m7dLabel.SetTitle(fmt.Sprintf("Requests                             %s used", reqUsed))
+	m7dBar.SetTitle(barFromTokenRatio(d.Requests))
+	m7dReset.SetTitle(fmt.Sprintf("Resets %s", tokenResetDate(d.Requests)))
+}
+
+func setStale(d *UsageData, staleness time.Duration) {
+	if d.isAPIKeyMode() {
+		setActiveAPIKey(d)
+	} else {
+		setActivePlan(d)
+	}
+	systray.SetTitle("[ ⏸ ]")
 	mStatus.SetTitle(fmt.Sprintf("%s · inactive %s", d.Model, fmtAgo(staleness)))
 }
 
@@ -1020,6 +1101,29 @@ func bar(p *float64) string {
 		filled = 0
 	}
 	return strings.Repeat("█", filled) + strings.Repeat("░", barWidth-filled)
+}
+
+func tokenUsedPct(t *TokenRateInfo) string {
+	if t == nil || t.Limit == 0 {
+		return "--"
+	}
+	used := float64(t.Limit-t.Remaining) / float64(t.Limit) * 100
+	return fmt.Sprintf("%.0f%%", used)
+}
+
+func barFromTokenRatio(t *TokenRateInfo) string {
+	if t == nil || t.Limit == 0 {
+		return strings.Repeat("░", barWidth)
+	}
+	usedPct := float64(t.Limit-t.Remaining) / float64(t.Limit) * 100
+	return bar(&usedPct)
+}
+
+func tokenResetDate(t *TokenRateInfo) string {
+	if t == nil || t.ResetsAt == nil {
+		return "--"
+	}
+	return resetDate(t.ResetsAt)
 }
 
 func resetDate(ts *int64) string {
