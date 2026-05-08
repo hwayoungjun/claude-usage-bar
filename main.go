@@ -70,6 +70,42 @@ func usageFilePath() string {
 	return filepath.Join(configDir(), "usage.json")
 }
 
+func settingsFilePath() string {
+	return filepath.Join(configDir(), "settings.json")
+}
+
+// ── User settings ──
+
+type DisplayMode string
+
+const (
+	DisplayShort DisplayMode = "short" // only 5h session
+	DisplayFull  DisplayMode = "full"  // 5h session + 7d week
+)
+
+type Settings struct {
+	DisplayMode DisplayMode `json:"display_mode"`
+}
+
+func loadSettings() Settings {
+	s := Settings{DisplayMode: DisplayFull}
+	raw, err := os.ReadFile(settingsFilePath())
+	if err != nil {
+		return s
+	}
+	_ = json.Unmarshal(raw, &s)
+	if s.DisplayMode != DisplayShort && s.DisplayMode != DisplayFull {
+		s.DisplayMode = DisplayFull
+	}
+	return s
+}
+
+func saveSettings(s Settings) {
+	os.MkdirAll(configDir(), 0755)
+	out, _ := json.MarshalIndent(s, "", "  ")
+	os.WriteFile(settingsFilePath(), out, 0644)
+}
+
 // ── PID file ──
 
 func pidFilePath() string {
@@ -468,6 +504,8 @@ var (
 	mStatus *systray.MenuItem
 
 	mSessionItems []*systray.MenuItem
+
+	settings Settings
 )
 
 const (
@@ -477,7 +515,8 @@ const (
 )
 
 func onReady() {
-	systray.SetTitle("[ 5h --  ·  7d -- ]")
+	settings = loadSettings()
+	systray.SetTitle(initialTitle())
 	systray.SetTooltip("Claude Usage Bar")
 
 	m5hLabel = systray.AddMenuItem("", "")
@@ -506,6 +545,11 @@ func onReady() {
 
 	systray.AddSeparator()
 
+	mDisplay := systray.AddMenuItem("Display", "Tray display mode")
+	mDisplayShort := mDisplay.AddSubMenuItem("5h only", "Show only 5h session")
+	mDisplayFull := mDisplay.AddSubMenuItem("5h + 7d", "Show 5h session and 7d week")
+	applyDisplayCheck(mDisplayShort, mDisplayFull)
+
 	mLaunch := systray.AddMenuItem("Launch at Login", "Toggle launch at login")
 	if isLaunchAgentInstalled() {
 		mLaunch.Check()
@@ -523,6 +567,16 @@ func onReady() {
 	go func() {
 		for {
 			select {
+			case <-mDisplayShort.ClickedCh:
+				settings.DisplayMode = DisplayShort
+				saveSettings(settings)
+				applyDisplayCheck(mDisplayShort, mDisplayFull)
+				refreshUI()
+			case <-mDisplayFull.ClickedCh:
+				settings.DisplayMode = DisplayFull
+				saveSettings(settings)
+				applyDisplayCheck(mDisplayShort, mDisplayFull)
+				refreshUI()
 			case <-mLaunch.ClickedCh:
 				if isLaunchAgentInstalled() {
 					removeLaunchAgent()
@@ -536,6 +590,30 @@ func onReady() {
 			}
 		}
 	}()
+}
+
+func applyDisplayCheck(short, full *systray.MenuItem) {
+	if settings.DisplayMode == DisplayShort {
+		short.Check()
+		full.Uncheck()
+	} else {
+		short.Uncheck()
+		full.Check()
+	}
+}
+
+func initialTitle() string {
+	if settings.DisplayMode == DisplayShort {
+		return "[ 5h -- ]"
+	}
+	return "[ 5h --  ·  7d -- ]"
+}
+
+func formatTitle(fiveHour, sevenDay string) string {
+	if settings.DisplayMode == DisplayShort {
+		return fmt.Sprintf("[ 5h %s ]", fiveHour)
+	}
+	return fmt.Sprintf("[ 5h %s  ·  7d %s ]", fiveHour, sevenDay)
 }
 
 var currentSessions []RecentSession
@@ -622,7 +700,7 @@ func setActive(d *UsageData) {
 	s := pct(d.FiveHour.UsedPercentage)
 	w := pct(d.SevenDay.UsedPercentage)
 
-	systray.SetTitle(fmt.Sprintf("[ 5h %s  ·  7d %s ]", s, w))
+	systray.SetTitle(formatTitle(s, w))
 
 	m5hLabel.SetTitle(fmt.Sprintf("5h Session                           %s used", s))
 	m5hBar.SetTitle(bar(d.FiveHour.UsedPercentage))

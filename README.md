@@ -9,6 +9,7 @@ macOS menu bar widget that displays your Claude Code rate limit usage in real ti
 Claude Code sends rate limit data via the `statusLine` hook on every assistant message. This tool captures that data and displays it in your macOS menu bar.
 
 - **Menu bar** — shows 5h session and 7d weekly usage at a glance
+- **Display modes** — toggle between `5h + 7d` (full) and `5h only` (short) from the **Display** submenu; preference is persisted
 - **Dropdown** — detailed view with progress bars and reset times
 - **Recent sessions** — shows last 5 sessions; click to copy `claude --resume` command
 - **Auto-refresh** — updates every time you chat with Claude Code
@@ -30,6 +31,20 @@ git clone https://github.com/hwayoungjun/claude-usage-bar.git
 cd claude-usage-bar
 go build -o claude-usage-bar .
 ./claude-usage-bar setup
+```
+
+### Makefile
+
+Common tasks are available via `make`:
+
+```bash
+make build              # build ./bin/claude-usage-bar
+make dev                # run in foreground (debugging)
+make install            # install to /usr/local/bin (or PREFIX=/opt/homebrew on Apple Silicon)
+make uninstall          # remove binary + run app uninstall
+make setup              # configure ~/.claude/settings.json
+make release            # build darwin arm64 + amd64 binaries
+make help               # list all targets
 ```
 
 ## Usage
