@@ -8,7 +8,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -106,36 +105,49 @@ func saveSettings(s Settings) {
 	os.WriteFile(settingsFilePath(), out, 0644)
 }
 
-// ── PID file ──
+// ── Single-instance lock ──
+//
+// We hold an exclusive flock on this file for the lifetime of the widget
+// process. A flock is released by the kernel when the holding process exits
+// (or its fd is closed), which makes it robust against PID reuse — a problem
+// the previous pid-file approach had after reboots, when an unrelated process
+// could inherit our old PID and trick us into thinking we were still running.
 
-func pidFilePath() string {
-	return filepath.Join(configDir(), "pid")
+func lockFilePath() string {
+	return filepath.Join(configDir(), "lock")
 }
 
-func isAlreadyRunning() bool {
-	raw, err := os.ReadFile(pidFilePath())
-	if err != nil {
-		return false
-	}
-	pid, err := strconv.Atoi(strings.TrimSpace(string(raw)))
-	if err != nil {
-		return false
-	}
-	proc, err := os.FindProcess(pid)
-	if err != nil {
-		return false
-	}
-	// Signal 0 checks if the process exists without killing it
-	return proc.Signal(syscall.Signal(0)) == nil
-}
-
-func writePidFile() {
+func openLockFile() (*os.File, error) {
 	os.MkdirAll(configDir(), 0755)
-	os.WriteFile(pidFilePath(), []byte(strconv.Itoa(os.Getpid())), 0644)
+	return os.OpenFile(lockFilePath(), os.O_CREATE|os.O_RDWR, 0644)
 }
 
-func removePidFile() {
-	os.Remove(pidFilePath())
+// isAlreadyRunning briefly probes the lock to report whether another instance
+// holds it. The probe acquires and immediately releases, so it does NOT
+// reserve the slot for the caller.
+func isAlreadyRunning() bool {
+	f, err := openLockFile()
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	return syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB) != nil
+}
+
+// acquireSingleInstanceLock takes an exclusive non-blocking lock and holds it
+// for the rest of the process lifetime. Returns false if another instance
+// already holds the lock.
+func acquireSingleInstanceLock() bool {
+	f, err := openLockFile()
+	if err != nil {
+		return false
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		f.Close()
+		return false
+	}
+	// Intentionally leak f; the kernel releases the lock on process exit.
+	return true
 }
 
 // ── Entry point ──
@@ -190,11 +202,10 @@ func main() {
 }
 
 func startWidget() {
-	if isAlreadyRunning() {
+	if !acquireSingleInstanceLock() {
 		fmt.Println("claude-usage-bar is already running.")
 		return
 	}
-	writePidFile()
 	ensureSetup()
 	systray.Run(onReady, onExit)
 }
@@ -551,7 +562,11 @@ func onReady() {
 	applyDisplayCheck(mDisplayShort, mDisplayFull)
 
 	mLaunch := systray.AddMenuItem("Launch at Login", "Toggle launch at login")
-	if isLaunchAgentInstalled() {
+	if isHomebrewManaged() {
+		mLaunch.Check()
+		mLaunch.SetTooltip("Managed by Homebrew — use `brew services` to change")
+		mLaunch.Disable()
+	} else if isLaunchAgentInstalled() {
 		mLaunch.Check()
 	}
 
@@ -578,11 +593,21 @@ func onReady() {
 				applyDisplayCheck(mDisplayShort, mDisplayFull)
 				refreshUI()
 			case <-mLaunch.ClickedCh:
+				if isHomebrewManaged() {
+					// Disabled — handler shouldn't fire, but guard just in case.
+					continue
+				}
 				if isLaunchAgentInstalled() {
-					removeLaunchAgent()
+					if err := removeLaunchAgent(); err != nil {
+						fmt.Fprintln(os.Stderr, "Launch at Login: remove failed:", err)
+						continue
+					}
 					mLaunch.Uncheck()
 				} else {
-					installLaunchAgent()
+					if err := installLaunchAgent(); err != nil {
+						fmt.Fprintln(os.Stderr, "Launch at Login: install failed:", err)
+						continue
+					}
 					mLaunch.Check()
 				}
 			case <-mQuit.ClickedCh:
@@ -646,7 +671,7 @@ func handleSessionClick(idx int) {
 }
 
 func onExit() {
-	removePidFile()
+	// Lock is released automatically when the process exits.
 }
 
 func watchFile() {
@@ -789,15 +814,64 @@ func fmtAgo(d time.Duration) string {
 // ── LaunchAgent ──
 
 const launchAgentLabel = "com.github.hwayoungjun.claude-usage-bar"
+const homebrewLaunchAgentLabel = "homebrew.mxcl.claude-usage-bar"
 
 func launchAgentPath() string {
 	home, _ := os.UserHomeDir()
 	return filepath.Join(home, "Library", "LaunchAgents", launchAgentLabel+".plist")
 }
 
+func homebrewLaunchAgentPath() string {
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, "Library", "LaunchAgents", homebrewLaunchAgentLabel+".plist")
+}
+
 func isLaunchAgentInstalled() bool {
 	_, err := os.Stat(launchAgentPath())
 	return err == nil
+}
+
+// isHomebrewManaged reports whether brew services is managing launch-at-login.
+// When true, the in-app toggle is disabled to avoid registering a duplicate
+// LaunchAgent for the same binary.
+func isHomebrewManaged() bool {
+	_, err := os.Stat(homebrewLaunchAgentPath())
+	return err == nil
+}
+
+func userDomainTarget() string {
+	return fmt.Sprintf("gui/%d", os.Getuid())
+}
+
+// bootstrapLaunchAgent loads the plist into the user's launchd domain so the
+// service starts immediately (and on every subsequent login). Returns nil if
+// the agent is already loaded.
+func bootstrapLaunchAgent() error {
+	out, err := exec.Command("launchctl", "bootstrap", userDomainTarget(), launchAgentPath()).CombinedOutput()
+	if err == nil {
+		return nil
+	}
+	// "service already loaded" / "already bootstrapped" — treat as success.
+	msg := string(out)
+	if strings.Contains(msg, "already") || strings.Contains(msg, "Bootstrap failed: 5") {
+		return nil
+	}
+	return fmt.Errorf("launchctl bootstrap: %v: %s", err, strings.TrimSpace(msg))
+}
+
+// bootoutLaunchAgent unloads the plist from launchd. Returns nil if not loaded.
+func bootoutLaunchAgent() error {
+	target := fmt.Sprintf("%s/%s", userDomainTarget(), launchAgentLabel)
+	out, err := exec.Command("launchctl", "bootout", target).CombinedOutput()
+	if err == nil {
+		return nil
+	}
+	msg := string(out)
+	// "No such process" / not loaded — treat as success.
+	if strings.Contains(msg, "No such process") || strings.Contains(msg, "Could not find") {
+		return nil
+	}
+	return fmt.Errorf("launchctl bootout: %v: %s", err, strings.TrimSpace(msg))
 }
 
 func stableBinPath() string {
@@ -840,11 +914,22 @@ func installLaunchAgent() error {
 
 	dir := filepath.Dir(launchAgentPath())
 	os.MkdirAll(dir, 0755)
-	return os.WriteFile(launchAgentPath(), []byte(plist), 0644)
+	if err := os.WriteFile(launchAgentPath(), []byte(plist), 0644); err != nil {
+		return err
+	}
+	return bootstrapLaunchAgent()
 }
 
 func removeLaunchAgent() error {
-	return os.Remove(launchAgentPath())
+	// Unload first so the service stops; otherwise the file goes away but the
+	// running launchd job lingers until reboot.
+	if err := bootoutLaunchAgent(); err != nil {
+		return err
+	}
+	if err := os.Remove(launchAgentPath()); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
 }
 
 func loadUsage() (*UsageData, error) {
