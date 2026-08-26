@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime/debug"
 	"time"
 
 	"github.com/hwayoungjun/claude-usage-bar/internal/app"
@@ -25,6 +26,11 @@ import (
 // envDaemon marks the backgrounded child, so it starts the widget instead of
 // forking again.
 const envDaemon = "CLAUDE_USAGE_BAR_DAEMON"
+
+// version is stamped at build time (see the Makefile\'s -X flag). A plain
+// `go build` leaves it empty and the revision Go embeds from git is used
+// instead, so a binary always knows what it is.
+var version string
 
 func main() {
 	if len(os.Args) > 1 {
@@ -43,6 +49,9 @@ func main() {
 			return
 		case "-h", "--help", "help":
 			printHelp()
+			return
+		case "-v", "--version", "version":
+			printVersion()
 			return
 		}
 	}
@@ -172,6 +181,53 @@ func stableBinPath() string {
 	return binPath
 }
 
+// printVersion reports the build and the binary behind it. The path matters as
+// much as the version: with an install in ~/.local/bin and another under a
+// Homebrew prefix, "which one is running" is the actual question.
+func printVersion() {
+	fmt.Printf("%s %s\n", app.Name, buildVersion())
+	if exe, err := os.Executable(); err == nil {
+		fmt.Println(exe)
+	}
+}
+
+func buildVersion() string {
+	if version != "" {
+		return version
+	}
+	info, ok := debug.ReadBuildInfo()
+	if !ok {
+		return "unknown"
+	}
+	if v := revisionFrom(info.Settings); v != "" {
+		return v
+	}
+	return "unknown"
+}
+
+// revisionFrom renders the git revision Go stamps into a binary built from a
+// checkout, marking a working tree that had uncommitted changes.
+func revisionFrom(settings []debug.BuildSetting) string {
+	var revision, suffix string
+	for _, s := range settings {
+		switch s.Key {
+		case "vcs.revision":
+			revision = s.Value
+			if len(revision) > 12 {
+				revision = revision[:12]
+			}
+		case "vcs.modified":
+			if s.Value == "true" {
+				suffix = "-dirty"
+			}
+		}
+	}
+	if revision == "" {
+		return ""
+	}
+	return revision + suffix
+}
+
 func printHelp() {
 	fmt.Printf(`%s — Claude Code usage monitor for macOS menu bar
 
@@ -181,5 +237,6 @@ Usage:
   %s statusline   StatusLine handler (used by Claude Code)
   %s setup        Auto-configure ~/.claude/settings.json
   %s uninstall    Remove all config, LaunchAgent, and statusLine settings
-`, app.Name, app.Name, app.Name, app.Name, app.Name, app.Name)
+  %s --version    Print the build and the path of this binary
+`, app.Name, app.Name, app.Name, app.Name, app.Name, app.Name, app.Name)
 }
