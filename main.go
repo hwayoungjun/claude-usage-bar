@@ -321,6 +321,7 @@ func ensureSetup() {
 	if err := setupStatusLine(); err != nil {
 		fmt.Fprintln(os.Stderr, "Auto-setup failed:", err)
 	}
+	refreshLaunchAgentPlist()
 }
 
 // runSetup is the CLI entrypoint for `claude-usage-bar setup`.
@@ -990,10 +991,12 @@ func stableBinPath() string {
 	return binPath
 }
 
-func installLaunchAgent() error {
-	binPath := stableBinPath()
-
-	plist := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
+func launchAgentPlist(binPath string) string {
+	// KeepAlive restarts only after a crash: a clean exit means the user picked
+	// Quit, while a start that fails at login — the window server can still be
+	// coming up that early — gets another attempt instead of leaving the menu bar
+	// empty until the next reboot.
+	return fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
@@ -1007,17 +1010,60 @@ func installLaunchAgent() error {
 	<key>RunAtLoad</key>
 	<true/>
 	<key>KeepAlive</key>
-	<false/>
+	<dict>
+		<key>SuccessfulExit</key>
+		<false/>
+	</dict>
+	<key>ThrottleInterval</key>
+	<integer>10</integer>
+	<key>ProcessType</key>
+	<string>Interactive</string>
 </dict>
 </plist>
 `, launchAgentLabel, binPath)
+}
 
+func installLaunchAgent() error {
 	dir := filepath.Dir(launchAgentPath())
 	os.MkdirAll(dir, 0755)
-	if err := os.WriteFile(launchAgentPath(), []byte(plist), 0644); err != nil {
+	if err := os.WriteFile(launchAgentPath(), []byte(launchAgentPlist(stableBinPath())), 0644); err != nil {
 		return err
 	}
 	return bootstrapLaunchAgent()
+}
+
+// plistProgramPath reads the binary path back out of the installed plist.
+func plistProgramPath() string {
+	out, err := exec.Command("/usr/libexec/PlistBuddy", "-c", "Print :ProgramArguments:0", launchAgentPath()).Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// refreshLaunchAgentPlist brings an already-installed plist up to date with the
+// keys this build writes, so plist fixes reach machines that turned Launch at
+// Login on with an older version. Only the keys are refreshed — the recorded
+// binary path is reused verbatim, because stableBinPath() falls back to a
+// version-specific Cellar path when it runs under launchd (whose PATH has no
+// Homebrew prefix) and would break at the next upgrade. Rewriting the file is
+// enough: launchd re-reads it at the next login, and re-bootstrapping here
+// would tear down the very process doing the rewrite.
+func refreshLaunchAgentPlist() {
+	if isHomebrewManaged() || !isLaunchAgentInstalled() {
+		return
+	}
+	binPath := plistProgramPath()
+	if binPath == "" {
+		return
+	}
+	want := launchAgentPlist(binPath)
+	if cur, err := os.ReadFile(launchAgentPath()); err == nil && string(cur) == want {
+		return
+	}
+	if err := os.WriteFile(launchAgentPath(), []byte(want), 0644); err != nil {
+		fmt.Fprintln(os.Stderr, "Launch at Login: plist refresh failed:", err)
+	}
 }
 
 func removeLaunchAgent() error {
