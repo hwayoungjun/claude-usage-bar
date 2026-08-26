@@ -446,13 +446,31 @@ func loadRecentSessions(limit int) []RecentSession {
 			break
 		}
 		s, ok := readTranscriptHead(c.path)
-		if !ok {
+		if !ok || isTempPath(s.Project) {
 			continue
 		}
 		s.LastActive = c.modified
 		result = append(result, s)
 	}
 	return result
+}
+
+// Sessions run out of a temp directory — scratch work, one-off probes, harness
+// scratchpads — are not projects anyone comes back to, so they are left out.
+var tempRoots = []string{
+	"/tmp", "/private/tmp",
+	"/var/tmp", "/private/var/tmp",
+	"/var/folders", "/private/var/folders",
+}
+
+func isTempPath(path string) bool {
+	path = filepath.Clean(path)
+	for _, root := range tempRoots {
+		if path == root || strings.HasPrefix(path, root+"/") {
+			return true
+		}
+	}
+	return false
 }
 
 // readTranscriptHead pulls the session id, working directory and opening prompt
