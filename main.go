@@ -543,18 +543,38 @@ func truncateWidth(s string, maxWidth int) string {
 	return string(out) + "…"
 }
 
-// sessionLabel lays "[project] prompt" out against a fixed column budget. Both
-// halves are trimmed now: the project name used to be unbounded while the
-// prompt was capped on its own, so a long project name pushed the row wide and
-// still cut the prompt early — which reads as the right side of the row
-// clipping well before the left.
-func sessionLabel(s RecentSession) string {
+// sessionLabel lays out one Recent Sessions row against the row budget. Both
+// halves are trimmed: the project name used to be unbounded while the prompt
+// was capped on its own, so a long project name pushed the row wide and still
+// cut the prompt early — which reads as the right side clipping before the
+// left. withProject is false when every visible session shares one project, in
+// which case the whole budget goes to the prompt.
+func sessionLabel(s RecentSession, withProject bool) string {
+	if !withProject {
+		return truncateWidth(s.FirstDisplay, sessionRowWidth)
+	}
 	proj := truncateWidth(projectName(s.Project), sessionProjectWidth)
-	room := sessionLabelWidth - displayWidth(proj) - len("[] ")
+	room := sessionRowWidth - displayWidth(proj) - displayWidth("[] ")
 	if room < sessionPromptMin {
 		room = sessionPromptMin
 	}
 	return fmt.Sprintf("[%s] %s", proj, truncateWidth(s.FirstDisplay, room))
+}
+
+// sharedProject returns the project every session belongs to, or "" when they
+// differ. Repeating one identical "[project]" on every row spends columns the
+// prompt can use instead, so the shared name moves up to the section header.
+func sharedProject(sessions []RecentSession) string {
+	if len(sessions) == 0 {
+		return ""
+	}
+	first := projectName(sessions[0].Project)
+	for _, s := range sessions[1:] {
+		if projectName(s.Project) != first {
+			return ""
+		}
+	}
+	return first
 }
 
 func copyResumeCommand(sessionID, project string) {
@@ -567,6 +587,8 @@ func copyResumeCommand(sessionID, project string) {
 // ── Menu bar widget ──
 
 var (
+	mSessionsHeader *systray.MenuItem
+
 	m5hLabel *systray.MenuItem
 	m5hBar   *systray.MenuItem
 	m5hReset *systray.MenuItem
@@ -586,12 +608,12 @@ const (
 	barWidth    = 20
 	maxSessions = 5
 
-	// Session rows are budgeted in display columns (see displayWidth). The widest
-	// fixed row in the dropdown is 46 columns, so they stay just under it and
-	// never become the row that decides how wide the menu gets drawn.
-	sessionLabelWidth   = 44
+	// Session rows are budgeted in display columns (see displayWidth), and get a
+	// much bigger budget than the fixed rows above them: the prompt is the only
+	// thing that tells two sessions apart, so it earns a wide dropdown.
+	sessionRowWidth     = 72
 	sessionProjectWidth = 16
-	sessionPromptMin    = 10
+	sessionPromptMin    = 20
 )
 
 func onReady() {
@@ -616,7 +638,8 @@ func onReady() {
 	systray.AddSeparator()
 
 	// Recent sessions
-	systray.AddMenuItem("Recent Sessions", "").Disable()
+	mSessionsHeader = systray.AddMenuItem("Recent Sessions", "")
+	mSessionsHeader.Disable()
 	for i := 0; i < maxSessions; i++ {
 		item := systray.AddMenuItem("", "")
 		item.Hide()
@@ -714,11 +737,15 @@ var currentSessions []RecentSession
 
 func refreshSessions() {
 	currentSessions = loadRecentSessions(maxSessions)
+	shared := sharedProject(currentSessions)
+	setSessionsHeader(shared)
 	for i := 0; i < maxSessions; i++ {
 		if i < len(currentSessions) {
 			s := currentSessions[i]
-			mSessionItems[i].SetTitle(sessionLabel(s))
-			mSessionItems[i].SetTooltip(s.FirstDisplay)
+			mSessionItems[i].SetTitle(sessionLabel(s, shared == ""))
+			// The row can only ever show a prefix of the prompt, so the tooltip
+			// carries the whole thing, project included.
+			mSessionItems[i].SetTooltip(projectName(s.Project) + " · " + s.FirstDisplay)
 			mSessionItems[i].Show()
 			// Start click handler for this item
 			go handleSessionClick(i)
@@ -726,6 +753,20 @@ func refreshSessions() {
 			mSessionItems[i].Hide()
 		}
 	}
+}
+
+// setSessionsHeader names the shared project on the section header when the
+// rows no longer carry it themselves.
+func setSessionsHeader(shared string) {
+	if mSessionsHeader == nil {
+		return
+	}
+	if shared == "" {
+		mSessionsHeader.SetTitle("Recent Sessions")
+		return
+	}
+	const prefix = "Recent Sessions — "
+	mSessionsHeader.SetTitle(prefix + truncateWidth(shared, sessionRowWidth-displayWidth(prefix)))
 }
 
 func handleSessionClick(idx int) {
