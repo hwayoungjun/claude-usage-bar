@@ -8,6 +8,8 @@ macOS menu bar widget that displays your Claude Code rate limit usage in real ti
 
 Claude Code sends rate limit data via the `statusLine` hook on every assistant message. This tool captures that data and displays it in your macOS menu bar.
 
+Sessions started from the Claude desktop app are covered too. `statusLine` never fires for those — the app runs Claude Code headless and draws its own UI, so there is no terminal status line to render — so the widget falls back to the usage history the desktop app keeps for its own meter (`~/Library/Application Support/Claude/plan-usage-history.json`). That costs no API call and no credentials, but it only carries percentages, and only about every 15 minutes.
+
 - **Menu bar** — shows 5h session and 7d weekly usage at a glance
 - **Display modes** — toggle between `5h + 7d` (full) and `5h only` (short) from the **Display** submenu; preference is persisted
 - **Dropdown** — detailed view with progress bars and reset times
@@ -78,15 +80,16 @@ This automatically removes the LaunchAgent, statusLine config, and app data.
 ## How data flows
 
 ```
-Claude Code ──stdin──▶ claude-usage-bar statusline ──▶ ~/.config/claude-usage-bar/usage.json
-                                                              │
-                                                              ▼
-                                                     claude-usage-bar (menu bar)
+Claude Code (terminal) ──stdin──▶ claude-usage-bar statusline ──▶ usage.json
+                                                                     │
+                                                                     ▼
+Claude desktop app ──▶ plan-usage-history.json ──────────▶ claude-usage-bar (menu bar)
 ```
 
 1. Claude Code calls `claude-usage-bar statusline` after each assistant message
-2. The statusline subcommand parses rate limit data from stdin and writes to `usage.json`
+2. The statusline subcommand parses rate limit data from stdin and writes to `~/.config/claude-usage-bar/usage.json`
 3. The menu bar widget watches `usage.json` via fsnotify and updates instantly
+4. When the desktop app's history is more recent than the last `statusLine` report, the widget shows that instead, labelled `Claude app`; reset times carry over from the last `statusLine` report while they are still in the future
 
 ## License
 

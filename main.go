@@ -224,16 +224,19 @@ Usage:
 
 // ── StatusLine subcommand ──
 
+// runStatusLine captures the rate limit data Claude Code passes on stdin and
+// writes nothing back. The statusLine slot in ~/.claude/settings.json holds
+// only one command, and this app claims it to read the data — not to draw in
+// the terminal. Printing nothing leaves the row under the input box to Claude
+// Code; the numbers show up in the menu bar instead.
 func runStatusLine() {
 	input, err := io.ReadAll(os.Stdin)
 	if err != nil {
-		fmt.Println("")
 		return
 	}
 
 	var sl StatusLineInput
 	if err := json.Unmarshal(input, &sl); err != nil {
-		fmt.Println("")
 		return
 	}
 
@@ -259,8 +262,6 @@ func runStatusLine() {
 
 	out, _ := json.Marshal(data)
 	os.WriteFile(usageFilePath(), out, 0644)
-
-	fmt.Println("")
 }
 
 // ── Setup ──
@@ -705,23 +706,57 @@ func periodicRefresh() {
 	}
 }
 
+// usageSource records where the numbers on screen came from. statusLine only
+// fires for terminal sessions, so the status row has to be honest about which
+// of the two sources the widget is showing.
+type usageSource int
+
+const (
+	sourceStatusLine usageSource = iota
+	sourceDesktopApp
+)
+
+func statusLabel(d *UsageData, src usageSource) string {
+	if src == sourceDesktopApp {
+		return "Claude app"
+	}
+	if d.Model == "" {
+		return "Claude Code"
+	}
+	return d.Model
+}
+
 func refreshUI() {
+	// statusLine covers terminal sessions; the desktop app's own history covers
+	// the sessions where statusLine never fires. Whichever saw usage last wins.
 	d, err := loadUsage()
 	if err != nil {
+		d = nil
+	}
+
+	src := sourceStatusLine
+	staleAfter := 10 * time.Minute
+	if desktop := loadDesktopUsage(); desktop != nil && (d == nil || desktop.UpdatedAt > d.UpdatedAt) {
+		d = mergeDesktop(desktop, d)
+		src = sourceDesktopApp
+		staleAfter = desktopStaleAfter
+	}
+
+	if d == nil {
 		setInactive()
 		return
 	}
 
 	staleness := time.Since(time.Unix(d.UpdatedAt, 0))
-	if staleness > 10*time.Minute {
-		setStale(d, staleness)
+	if staleness > staleAfter {
+		setStale(d, staleness, src)
 		return
 	}
 
-	setActive(d)
+	setActive(d, src)
 }
 
-func setActive(d *UsageData) {
+func setActive(d *UsageData, src usageSource) {
 	s := pct(d.FiveHour.UsedPercentage)
 	w := pct(d.SevenDay.UsedPercentage)
 
@@ -736,10 +771,10 @@ func setActive(d *UsageData) {
 	m7dReset.SetTitle(fmt.Sprintf("Resets %s", resetDate(d.SevenDay.ResetsAt)))
 
 	ago := fmtAgo(time.Since(time.Unix(d.UpdatedAt, 0)))
-	mStatus.SetTitle(fmt.Sprintf("%s · %s", d.Model, ago))
+	mStatus.SetTitle(fmt.Sprintf("%s · %s", statusLabel(d, src), ago))
 }
 
-func setStale(d *UsageData, staleness time.Duration) {
+func setStale(d *UsageData, staleness time.Duration, src usageSource) {
 	s := pct(d.FiveHour.UsedPercentage)
 	w := pct(d.SevenDay.UsedPercentage)
 
@@ -753,7 +788,7 @@ func setStale(d *UsageData, staleness time.Duration) {
 	m7dBar.SetTitle(bar(d.SevenDay.UsedPercentage))
 	m7dReset.SetTitle(fmt.Sprintf("Resets %s", resetDate(d.SevenDay.ResetsAt)))
 
-	mStatus.SetTitle(fmt.Sprintf("%s · inactive %s", d.Model, fmtAgo(staleness)))
+	mStatus.SetTitle(fmt.Sprintf("%s · inactive %s", statusLabel(d, src), fmtAgo(staleness)))
 }
 
 func setInactive() {
