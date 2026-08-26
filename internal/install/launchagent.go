@@ -135,6 +135,33 @@ func (a LaunchAgent) RefreshPlist() (bool, error) {
 	return true, nil
 }
 
+// RestartMode says how a restart has to be carried out, which depends on who
+// owns launch-at-login on this machine.
+type RestartMode int
+
+const (
+	// RestartViaHomebrew: `brew services` owns the job, so restarting it is its
+	// job too — touching it here would fight the tool the user expects to use.
+	RestartViaHomebrew RestartMode = iota
+	// RestartViaLaunchd: our own job is installed. Unloading and loading it again
+	// is also what makes launchd re-read a plist this build has since changed.
+	RestartViaLaunchd
+	// RestartDirect: nothing is registered, so the widget is simply started.
+	RestartDirect
+)
+
+// RestartMode reports which of the three paths applies.
+func (a LaunchAgent) RestartMode() RestartMode {
+	switch {
+	case a.IsHomebrewManaged():
+		return RestartViaHomebrew
+	case a.IsInstalled():
+		return RestartViaLaunchd
+	default:
+		return RestartDirect
+	}
+}
+
 func (a LaunchAgent) domain() string { return fmt.Sprintf("gui/%d", a.UID) }
 
 // Bootstrap loads the plist into the user's launchd domain. An already-loaded

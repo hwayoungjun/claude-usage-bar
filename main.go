@@ -13,6 +13,9 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime/debug"
+	"strconv"
+	"strings"
+	"syscall"
 	"time"
 
 	"github.com/hwayoungjun/claude-usage-bar/internal/app"
@@ -44,6 +47,9 @@ func main() {
 			return
 		case "uninstall":
 			runUninstall()
+			return
+		case "restart":
+			runRestart()
 			return
 		case "--foreground":
 			startWidget()
@@ -136,6 +142,72 @@ func runSetup() {
 		os.Exit(1)
 	}
 	fmt.Println("✓ Configured statusLine in", store.ClaudeSettingsPath())
+}
+
+// restartStopTimeout bounds how long a restart waits for the outgoing instance
+// to let go of the single-instance lock.
+const restartStopTimeout = 10 * time.Second
+
+// runRestart stops whatever is running and starts it again. Doing this by hand
+// has three traps — a pkill pattern that misses the backgrounded instance
+// because only launchd passes --foreground, the lock the outgoing process holds
+// for a moment after being signalled, and a launchd-managed job that has to be
+// reloaded rather than killed — so it lives here instead of in a README.
+func runRestart() {
+	agent := defaultLaunchAgent()
+	mode := agent.RestartMode()
+
+	if mode == install.RestartViaHomebrew {
+		fmt.Println("Launch at Login is managed by Homebrew; restart it there:")
+		fmt.Printf("  brew services restart %s\n", app.Name)
+		return
+	}
+
+	// Unloading first stops the job launchd is running, and is what makes it
+	// re-read a plist this build has since changed.
+	if mode == install.RestartViaLaunchd {
+		if err := agent.Bootout(); err != nil {
+			fmt.Fprintln(os.Stderr, "restart:", err)
+			os.Exit(1)
+		}
+	}
+
+	// An instance started by hand is not launchd\'s to stop.
+	stopRunningInstances()
+
+	if !store.DefaultLock().WaitUntilFree(restartStopTimeout) {
+		fmt.Fprintln(os.Stderr, "restart: an instance is still holding the lock; nothing was started")
+		os.Exit(1)
+	}
+
+	if mode == install.RestartViaLaunchd {
+		if err := agent.Bootstrap(); err != nil {
+			fmt.Fprintln(os.Stderr, "restart:", err)
+			os.Exit(1)
+		}
+		fmt.Println("Restarted via launchd.")
+		return
+	}
+	daemonize()
+}
+
+// stopRunningInstances signals every other copy of this binary. The lock
+// records no pid, so instances have to be found by name — and this process
+// answers to that name too, so it is skipped.
+func stopRunningInstances() {
+	out, err := exec.Command("pgrep", "-x", app.Name).Output()
+	if err != nil {
+		// pgrep exits non-zero when nothing matches.
+		return
+	}
+	self := os.Getpid()
+	for _, field := range strings.Fields(string(out)) {
+		pid, err := strconv.Atoi(field)
+		if err != nil || pid == self {
+			continue
+		}
+		syscall.Kill(pid, syscall.SIGTERM)
+	}
 }
 
 func runUninstall() {
@@ -266,6 +338,7 @@ Usage:
   %s statusline   StatusLine handler (used by Claude Code)
   %s setup        Auto-configure ~/.claude/settings.json
   %s uninstall    Remove all config, LaunchAgent, and statusLine settings
+  %s restart      Stop the running widget and start it again
   %s --version    Print the build and the path of this binary
-`, app.Name, app.Name, app.Name, app.Name, app.Name, app.Name, app.Name)
+`, app.Name, app.Name, app.Name, app.Name, app.Name, app.Name, app.Name, app.Name)
 }

@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"syscall"
+	"time"
 )
 
 // Lock is the single-instance guard.
@@ -44,6 +45,23 @@ func (l *Lock) Acquire() bool {
 	}
 	l.held = f
 	return true
+}
+
+// WaitUntilFree blocks until no instance holds the lock, and reports whether it
+// came free within timeout. A process that has just been signalled does not
+// release its lock instantly, and a replacement started too early is the one
+// that ends up bailing out.
+func (l *Lock) WaitUntilFree(timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for {
+		if !l.HeldElsewhere() {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
 }
 
 // HeldElsewhere probes whether another instance holds the lock. The probe

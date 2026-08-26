@@ -246,3 +246,27 @@ func TestRefreshPlistStandsAside(t *testing.T) {
 		t.Errorf("unreadable plist: changed=%v err=%v", changed, err)
 	}
 }
+
+func TestRestartMode(t *testing.T) {
+	dir := t.TempDir()
+	agent := LaunchAgent{
+		Label:        "com.example.widget",
+		Path:         filepath.Join(dir, "ours.plist"),
+		HomebrewPath: filepath.Join(dir, "brew.plist"),
+	}
+
+	if got := agent.RestartMode(); got != RestartDirect {
+		t.Errorf("nothing installed: mode = %v, want RestartDirect", got)
+	}
+
+	os.WriteFile(agent.Path, []byte("x"), 0644)
+	if got := agent.RestartMode(); got != RestartViaLaunchd {
+		t.Errorf("our job installed: mode = %v, want RestartViaLaunchd", got)
+	}
+
+	// Homebrew wins: restarting its job is `brew services`' business, not ours.
+	os.WriteFile(agent.HomebrewPath, []byte("x"), 0644)
+	if got := agent.RestartMode(); got != RestartViaHomebrew {
+		t.Errorf("homebrew managed: mode = %v, want RestartViaHomebrew", got)
+	}
+}
