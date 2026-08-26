@@ -15,6 +15,7 @@ import (
 
 	"github.com/hwayoungjun/claude-usage-bar/internal/install"
 	"github.com/hwayoungjun/claude-usage-bar/internal/session"
+	"github.com/hwayoungjun/claude-usage-bar/internal/shellquote"
 	"github.com/hwayoungjun/claude-usage-bar/internal/store"
 	"github.com/hwayoungjun/claude-usage-bar/internal/textwidth"
 	"github.com/hwayoungjun/claude-usage-bar/internal/usage"
@@ -285,7 +286,11 @@ func (w *Widget) handleSessionClick(index int) {
 	<-w.sessionItems[index].ClickedCh
 	if index < len(w.current) {
 		s := w.current[index]
-		copyToClipboard(fmt.Sprintf("cd %s && claude --resume %s", s.Project, s.ID))
+		// Both halves are quoted: the project is a transcript's cwd field and the
+		// id is a transcript's filename, so neither is ours to trust in a command
+		// the user is about to paste into a shell.
+		copyToClipboard(fmt.Sprintf("cd %s && claude --resume %s",
+			shellquote.Quote(s.Project), shellquote.Quote(s.ID)))
 	}
 	go w.handleSessionClick(index)
 }

@@ -25,10 +25,10 @@ type Lock struct {
 func DefaultLock() *Lock { return &Lock{Path: LockPath()} }
 
 func (l *Lock) open() (*os.File, error) {
-	if err := os.MkdirAll(filepath.Dir(l.Path), 0755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(l.Path), 0700); err != nil {
 		return nil, err
 	}
-	return os.OpenFile(l.Path, os.O_CREATE|os.O_RDWR, 0644)
+	return os.OpenFile(l.Path, os.O_CREATE|os.O_RDWR, 0600)
 }
 
 // Acquire takes the lock and keeps it. It reports false when another instance

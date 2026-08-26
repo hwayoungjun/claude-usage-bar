@@ -36,13 +36,21 @@ func (f UsageFile) Load() (*usage.Data, error) {
 }
 
 // Save replaces the file. The widget watches it, so writes are what wake it up.
+//
+// The file records session ids and which model is in use. Nothing outside this
+// process reads it, so it is kept owner-only, and the mode is enforced on every
+// write to bring along files created by an earlier version.
 func (f UsageFile) Save(d *usage.Data) error {
-	if err := os.MkdirAll(filepath.Dir(f.Path), 0755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(f.Path), 0700); err != nil {
 		return err
 	}
 	out, err := json.Marshal(d)
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(f.Path, out, 0644)
+	if err := os.WriteFile(f.Path, out, 0600); err != nil {
+		return err
+	}
+	// WriteFile only applies the mode when it creates the file.
+	return os.Chmod(f.Path, 0600)
 }

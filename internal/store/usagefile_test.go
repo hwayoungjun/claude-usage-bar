@@ -75,3 +75,24 @@ func TestUsageFileLoadErrors(t *testing.T) {
 		t.Error("a reading without updated_at should be an error")
 	}
 }
+
+// The file records session ids, so it should not be world-readable — including
+// when it was created by a version that wrote it 0644.
+func TestUsageFileIsOwnerOnly(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "usage.json")
+	if err := os.WriteFile(path, []byte(`{"updated_at":1}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	f := UsageFile{Path: path}
+	if err := f.Save(&usage.Data{UpdatedAt: 1_800_000_000}); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mode := info.Mode().Perm(); mode != 0600 {
+		t.Errorf("mode = %04o, want 0600", mode)
+	}
+}

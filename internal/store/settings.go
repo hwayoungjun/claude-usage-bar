@@ -38,12 +38,12 @@ func (f SettingsFile) Load() Settings {
 
 // Save writes the preferences back.
 func (f SettingsFile) Save(s Settings) error {
-	if err := os.MkdirAll(filepath.Dir(f.Path), 0755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(f.Path), 0700); err != nil {
 		return err
 	}
 	out, err := json.MarshalIndent(s, "", "  ")
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(f.Path, out, 0644)
+	return os.WriteFile(f.Path, out, 0600)
 }

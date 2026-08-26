@@ -18,6 +18,7 @@ import (
 	"github.com/hwayoungjun/claude-usage-bar/internal/app"
 	"github.com/hwayoungjun/claude-usage-bar/internal/install"
 	"github.com/hwayoungjun/claude-usage-bar/internal/session"
+	"github.com/hwayoungjun/claude-usage-bar/internal/shellquote"
 	"github.com/hwayoungjun/claude-usage-bar/internal/statusline"
 	"github.com/hwayoungjun/claude-usage-bar/internal/store"
 	"github.com/hwayoungjun/claude-usage-bar/internal/ui"
@@ -156,29 +157,57 @@ func defaultLaunchAgent() install.LaunchAgent {
 	return install.DefaultLaunchAgent(app.LaunchAgentLabel, app.HomebrewLaunchAgentLabel)
 }
 
-// statusLineCommand is what gets written into Claude Code's settings.
+// statusLineCommand is what gets written into Claude Code's settings. Claude
+// Code runs it through a shell, so the install path is quoted: a directory name
+// with a space in it would otherwise produce a broken hook, and a stranger
+// character would produce a hook that does more than it says.
 func statusLineCommand() string {
 	binPath, err := exec.LookPath(os.Args[0])
 	if err != nil {
 		binPath = os.Args[0]
 	}
 	binPath, _ = filepath.Abs(binPath)
-	return binPath + " statusline"
+	return shellquote.Quote(binPath) + " statusline"
 }
 
 // stableBinPath prefers the PATH entry (for example
 // /opt/homebrew/bin/claude-usage-bar), which is a symlink that survives brew
 // upgrades. os.Executable resolves symlinks on macOS and would hand back the
 // version-specific Cellar path, which breaks at the next upgrade.
+//
+// The PATH entry is only trusted when it is this very binary. This path is
+// written into the LaunchAgent plist and re-executed when backgrounding, so a
+// writable directory earlier in PATH would otherwise be a way to get a
+// different binary launched at every login. Following the symlink and comparing
+// files accepts the legitimate case — the Homebrew symlink and its Cellar
+// target are one file — and rejects a planted impostor.
 func stableBinPath() string {
-	if p, err := exec.LookPath(app.Name); err == nil {
-		if abs, err := filepath.Abs(p); err == nil {
+	self, err := os.Executable()
+	if err == nil {
+		self, _ = filepath.Abs(self)
+	}
+	if p, lookErr := exec.LookPath(app.Name); lookErr == nil {
+		if abs, absErr := filepath.Abs(p); absErr == nil && sameFile(abs, self) {
 			return abs
 		}
 	}
-	binPath, _ := os.Executable()
-	binPath, _ = filepath.Abs(binPath)
-	return binPath
+	return self
+}
+
+// sameFile reports whether two paths resolve to one file on disk.
+func sameFile(a, b string) bool {
+	if a == "" || b == "" {
+		return false
+	}
+	infoA, err := os.Stat(a)
+	if err != nil {
+		return false
+	}
+	infoB, err := os.Stat(b)
+	if err != nil {
+		return false
+	}
+	return os.SameFile(infoA, infoB)
 }
 
 // printVersion reports the build and the binary behind it. The path matters as
