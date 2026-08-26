@@ -27,10 +27,11 @@ const (
 	// dropdown. Widths are display columns (see textwidth).
 	//
 	// These are caps, not padding — macOS sizes the menu to the widest row it
-	// actually draws. A wider budget was tried and reverted: a long prompt then
+	// actually draws. Wider budgets were tried and walked back: a long prompt
 	// stretched the dropdown far past every other row, which read worse than the
-	// truncation it avoided.
-	RowWidth     = 72
+	// truncation it avoided. 44 keeps session rows just under the widest fixed
+	// row above them, so they never decide how wide the menu is drawn.
+	RowWidth     = 44
 	ProjectWidth = 16
 	PromptMin    = 20
 )
