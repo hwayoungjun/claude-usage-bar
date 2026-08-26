@@ -487,12 +487,73 @@ func projectName(fullPath string) string {
 	return filepath.Base(fullPath)
 }
 
-func truncate(s string, maxLen int) string {
-	runes := []rune(s)
-	if len(runes) <= maxLen {
+// displayWidth approximates how wide a string renders in the menu: CJK and
+// emoji runes take about two columns, everything else one. Session rows are
+// budgeted in these columns rather than in runes, so a Korean prompt and an
+// English one get cut at roughly the same visual width.
+func displayWidth(s string) int {
+	w := 0
+	for _, r := range s {
+		w += runeWidth(r)
+	}
+	return w
+}
+
+func runeWidth(r rune) int {
+	switch {
+	case r >= 0x1100 && r <= 0x115F, // Hangul Jamo
+		r >= 0x2E80 && r <= 0x303E, // CJK radicals, Kangxi, CJK punctuation
+		r >= 0x3041 && r <= 0x33FF, // kana, Hangul compatibility, CJK compatibility
+		r >= 0x3400 && r <= 0x4DBF, // CJK extension A
+		r >= 0x4E00 && r <= 0x9FFF, // CJK unified ideographs
+		r >= 0xA000 && r <= 0xA4CF, // Yi
+		r >= 0xAC00 && r <= 0xD7A3, // Hangul syllables
+		r >= 0xF900 && r <= 0xFAFF, // CJK compatibility ideographs
+		r >= 0xFE30 && r <= 0xFE6F, // CJK compatibility forms
+		r >= 0xFF00 && r <= 0xFF60, // fullwidth forms
+		r >= 0xFFE0 && r <= 0xFFE6,
+		r >= 0x1F300 && r <= 0x1F64F, // emoji
+		r >= 0x1F900 && r <= 0x1F9FF:
+		return 2
+	}
+	return 1
+}
+
+// truncateWidth cuts s down to maxWidth display columns, marking the cut with
+// an ellipsis (itself one column wide).
+func truncateWidth(s string, maxWidth int) string {
+	if maxWidth <= 1 {
+		return "…"
+	}
+	if displayWidth(s) <= maxWidth {
 		return s
 	}
-	return string(runes[:maxLen-1]) + "…"
+	budget := maxWidth - 1
+	w := 0
+	var out []rune
+	for _, r := range s {
+		rw := runeWidth(r)
+		if w+rw > budget {
+			break
+		}
+		out = append(out, r)
+		w += rw
+	}
+	return string(out) + "…"
+}
+
+// sessionLabel lays "[project] prompt" out against a fixed column budget. Both
+// halves are trimmed now: the project name used to be unbounded while the
+// prompt was capped on its own, so a long project name pushed the row wide and
+// still cut the prompt early — which reads as the right side of the row
+// clipping well before the left.
+func sessionLabel(s RecentSession) string {
+	proj := truncateWidth(projectName(s.Project), sessionProjectWidth)
+	room := sessionLabelWidth - displayWidth(proj) - len("[] ")
+	if room < sessionPromptMin {
+		room = sessionPromptMin
+	}
+	return fmt.Sprintf("[%s] %s", proj, truncateWidth(s.FirstDisplay, room))
 }
 
 func copyResumeCommand(sessionID, project string) {
@@ -521,9 +582,15 @@ var (
 )
 
 const (
-	barWidth        = 20
-	maxSessions     = 5
-	sessionLabelLen = 20
+	barWidth    = 20
+	maxSessions = 5
+
+	// Session rows are budgeted in display columns (see displayWidth). The widest
+	// fixed row in the dropdown is 46 columns, so they stay just under it and
+	// never become the row that decides how wide the menu gets drawn.
+	sessionLabelWidth   = 44
+	sessionProjectWidth = 16
+	sessionPromptMin    = 10
 )
 
 func onReady() {
@@ -649,9 +716,7 @@ func refreshSessions() {
 	for i := 0; i < maxSessions; i++ {
 		if i < len(currentSessions) {
 			s := currentSessions[i]
-			proj := projectName(s.Project)
-			label := fmt.Sprintf("[%s] %s", proj, truncate(s.FirstDisplay, sessionLabelLen))
-			mSessionItems[i].SetTitle(label)
+			mSessionItems[i].SetTitle(sessionLabel(s))
 			mSessionItems[i].SetTooltip(s.FirstDisplay)
 			mSessionItems[i].Show()
 			// Start click handler for this item
