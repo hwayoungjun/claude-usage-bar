@@ -15,9 +15,6 @@ func TestResolveNoReadings(t *testing.T) {
 	if got.Data != nil || got.Source != SourceNone {
 		t.Errorf("want an empty snapshot, got %+v", got)
 	}
-	if got.Label() != "Claude Code" {
-		t.Errorf("Label() = %q", got.Label())
-	}
 }
 
 func TestResolvePicksFresherReading(t *testing.T) {
@@ -103,30 +100,10 @@ func TestResolveCarriesResetTimesOntoDesktopReadings(t *testing.T) {
 	if got.Data.SevenDay.ResetsAt == nil || *got.Data.SevenDay.ResetsAt != future {
 		t.Error("a reset time still in the future should carry over")
 	}
-	if got.Label() != "Claude app" {
-		t.Errorf("Label() = %q, want the desktop source named", got.Label())
+	if got.Source != SourceDesktopApp {
+		t.Errorf("Source = %v, want SourceDesktopApp", got.Source)
 	}
 	if statusLine.SevenDay.UsedPercentage == nil || *statusLine.SevenDay.UsedPercentage != 40 {
 		t.Error("merging must not mutate the inputs")
-	}
-}
-
-func TestLabel(t *testing.T) {
-	tests := []struct {
-		name string
-		snap Snapshot
-		want string
-	}{
-		{"desktop never borrows a model name",
-			Snapshot{Source: SourceDesktopApp, Data: &Data{Model: "Opus 5"}}, "Claude app"},
-		{"statusLine shows the model",
-			Snapshot{Source: SourceStatusLine, Data: &Data{Model: "Opus 5 (1M context)"}}, "Opus 5 (1M context)"},
-		{"statusLine without a model",
-			Snapshot{Source: SourceStatusLine, Data: &Data{}}, "Claude Code"},
-	}
-	for _, tt := range tests {
-		if got := tt.snap.Label(); got != tt.want {
-			t.Errorf("%s: Label() = %q, want %q", tt.name, got, tt.want)
-		}
 	}
 }

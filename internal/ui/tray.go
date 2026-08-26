@@ -45,7 +45,6 @@ type Widget struct {
 
 	fiveHourLabel, fiveHourBar, fiveHourReset *systray.MenuItem
 	sevenDayLabel, sevenDayBar, sevenDayReset *systray.MenuItem
-	status                                    *systray.MenuItem
 	sessionsHeader                            *systray.MenuItem
 	sessionItems                              []*systray.MenuItem
 
@@ -76,10 +75,6 @@ func (w *Widget) onReady() {
 	w.sevenDayLabel = systray.AddMenuItem("", "")
 	w.sevenDayBar = systray.AddMenuItem("", "")
 	w.sevenDayReset = systray.AddMenuItem("", "")
-
-	systray.AddSeparator()
-
-	w.status = systray.AddMenuItem("", "")
 
 	systray.AddSeparator()
 
@@ -218,15 +213,15 @@ func (w *Widget) refresh() {
 	}
 	w.showWindows(snapshot)
 
+	// A reading too old to trust shows as the idle title in the menu bar; the
+	// dropdown carries no status row of its own.
 	if snapshot.Stale {
 		systray.SetTitle(usage.IdleTrayTitle)
-		w.status.SetTitle(fmt.Sprintf("%s · inactive %s", snapshot.Label(), usage.Ago(snapshot.Age)))
 		return
 	}
 	systray.SetTitle(usage.TrayTitle(w.settings.DisplayMode,
 		usage.Percent(snapshot.Data.FiveHour.UsedPercentage),
 		usage.Percent(snapshot.Data.SevenDay.UsedPercentage)))
-	w.status.SetTitle(fmt.Sprintf("%s · %s", snapshot.Label(), usage.Ago(snapshot.Age)))
 }
 
 func (w *Widget) showWindows(s usage.Snapshot) {
@@ -249,8 +244,6 @@ func (w *Widget) showIdle() {
 	w.sevenDayLabel.SetTitle("7d All Models                         --")
 	w.sevenDayBar.SetTitle(strings.Repeat("░", usage.BarWidth))
 	w.sevenDayReset.SetTitle(" ")
-
-	w.status.SetTitle("Waiting for Claude Code...")
 }
 
 func (w *Widget) refreshSessions() {

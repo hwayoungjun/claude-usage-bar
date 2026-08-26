@@ -87,16 +87,3 @@ func merge(desktop, statusLine *Data, now time.Time) *Data {
 	}
 	return &out
 }
-
-// Label names the source for the status row. Desktop readings deliberately do
-// not borrow the model name from an unrelated terminal session.
-func (s Snapshot) Label() string {
-	switch {
-	case s.Source == SourceDesktopApp:
-		return "Claude app"
-	case s.Data == nil || s.Data.Model == "":
-		return "Claude Code"
-	default:
-		return s.Data.Model
-	}
-}
