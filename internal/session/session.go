@@ -25,8 +25,12 @@ const (
 	// Session rows get a far bigger budget than the fixed rows above them: the
 	// prompt is the only thing that tells two sessions apart, so it earns a wide
 	// dropdown. Widths are display columns (see textwidth).
-	RowWidth     = 72
-	ProjectWidth = 16
+	//
+	// These are caps, not padding — macOS sizes the menu to the widest row it
+	// actually draws — so a generous budget costs nothing on a day of short
+	// prompts and pays off on a long one.
+	RowWidth     = 120
+	ProjectWidth = 28
 	PromptMin    = 20
 )
 
