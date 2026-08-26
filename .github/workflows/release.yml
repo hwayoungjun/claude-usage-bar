@@ -4,6 +4,17 @@ on:
   push:
     tags:
       - 'v*'
+  # A tag push should be enough, but it has silently failed to create a run;
+  # this makes releasing an existing tag something that can be done by hand.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag to release (e.g. v0.8.2)'
+        required: true
+
+env:
+  # The tag being released, whichever way this run started.
+  RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
 
 jobs:
   build:
@@ -19,6 +30,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
 
       - uses: actions/setup-go@v5
         with:
@@ -29,7 +42,7 @@ jobs:
           CGO_ENABLED: 1
           GOARCH: ${{ matrix.goarch }}
         run: |
-          go build -ldflags "-s -w -X main.version=${{ github.ref_name }}" \
+          go build -ldflags "-s -w -X main.version=${RELEASE_TAG}" \
             -o claude-usage-bar-darwin-${{ matrix.arch }} .
           tar -czf claude-usage-bar-darwin-${{ matrix.arch }}.tar.gz claude-usage-bar-darwin-${{ matrix.arch }}
 
@@ -45,12 +58,15 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
 
       - uses: actions/download-artifact@v4
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ env.RELEASE_TAG }}
           files: |
             claude-usage-bar-darwin-arm64/claude-usage-bar-darwin-arm64.tar.gz
             claude-usage-bar-darwin-amd64/claude-usage-bar-darwin-amd64.tar.gz
@@ -64,7 +80,7 @@ jobs:
             exit 0
           fi
 
-          VERSION=${GITHUB_REF_NAME#v}
+          VERSION=${RELEASE_TAG#v}
           SHA256_ARM64=$(sha256sum claude-usage-bar-darwin-arm64/claude-usage-bar-darwin-arm64.tar.gz | awk '{print $1}')
           SHA256_AMD64=$(sha256sum claude-usage-bar-darwin-amd64/claude-usage-bar-darwin-amd64.tar.gz | awk '{print $1}')
 
