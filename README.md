@@ -91,6 +91,30 @@ Claude desktop app ──▶ plan-usage-history.json ─────────
 3. The menu bar widget watches `usage.json` via fsnotify and updates instantly
 4. When the desktop app's history is more recent than the last `statusLine` report, the widget shows that instead, labelled `Claude app`; reset times carry over from the last `statusLine` report while they are still in the future
 
+## Project layout
+
+Dependencies point one way: the composition root wires adapters to the domain,
+and the domain knows about neither.
+
+```
+main.go                  composition root — subcommand dispatch and wiring
+internal/app             shared identifiers (binary name, launchd labels)
+internal/usage           domain — readings, which source to trust, staleness, formatting
+internal/session         domain — session rows and layout, plus the transcript reader
+internal/textwidth       domain — display-column measurement and truncation
+internal/store           adapters — usage.json, desktop history, preferences, instance lock
+internal/statusline      adapter — the Claude Code hook payload
+internal/install         adapters — Claude Code settings, LaunchAgent, uninstall
+internal/ui              adapter — the systray menu
+```
+
+```bash
+make test
+```
+
+The domain packages carry the tests: usage 98%, session 92%, textwidth 100%,
+statusline 93%. The systray layer holds no rules and is not covered.
+
 ## License
 
 MIT
