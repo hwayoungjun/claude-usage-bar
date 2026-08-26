@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -42,13 +43,6 @@ type StatusLineInput struct {
 		DisplayName string `json:"display_name"`
 	} `json:"model"`
 	SessionID string `json:"session_id"`
-}
-
-type HistoryEntry struct {
-	Display   string `json:"display"`
-	Timestamp int64  `json:"timestamp"`
-	Project   string `json:"project"`
-	SessionID string `json:"sessionId"`
 }
 
 type RecentSession struct {
@@ -398,90 +392,133 @@ func runUninstall() {
 
 // ── Recent sessions ──
 
-func historyFilePath() string {
+func transcriptRoot() string {
 	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".claude", "history.jsonl")
+	return filepath.Join(home, ".claude", "projects")
 }
 
+// Reading only the head of a transcript is enough to find its opening prompt,
+// and bounds the work on a long conversation.
+const transcriptHeadLines = 200
+
+type transcriptEntry struct {
+	Type        string `json:"type"`
+	IsMeta      bool   `json:"isMeta"`
+	IsSidechain bool   `json:"isSidechain"`
+	Cwd         string `json:"cwd"`
+	Message     struct {
+		Content json.RawMessage `json:"content"`
+	} `json:"message"`
+}
+
+// loadRecentSessions lists the most recently active sessions across every
+// surface. The previous source, ~/.claude/history.jsonl, holds the terminal
+// REPL's input buffer only, so sessions started from the Claude desktop app
+// never showed up. The per-session transcripts under ~/.claude/projects cover
+// both, and `claude --resume` works on either kind, so the rows need no source
+// distinction. Transcripts are ranked by mtime and opened only until enough
+// usable ones turn up — less work than parsing the whole history file was.
 func loadRecentSessions(limit int) []RecentSession {
-	f, err := os.Open(historyFilePath())
+	paths, err := filepath.Glob(filepath.Join(transcriptRoot(), "*", "*.jsonl"))
 	if err != nil {
 		return nil
 	}
-	defer f.Close()
 
-	// Track per-session: first display and last timestamp
-	type sessionAcc struct {
-		project      string
-		firstDisplay string
-		firstTS      int64
-		lastTS       int64
+	type candidate struct {
+		path     string
+		modified int64
 	}
-	sessions := make(map[string]*sessionAcc)
-	var order []string
-
-	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
-	for scanner.Scan() {
-		var e HistoryEntry
-		if err := json.Unmarshal(scanner.Bytes(), &e); err != nil {
+	candidates := make([]candidate, 0, len(paths))
+	for _, p := range paths {
+		info, err := os.Stat(p)
+		if err != nil {
 			continue
 		}
-		if e.SessionID == "" || e.Display == "" {
-			continue
-		}
-		// Skip slash commands and short noise
-		if strings.HasPrefix(e.Display, "/") || e.Display == "exit" {
-			// Still update lastTS
-			if s, ok := sessions[e.SessionID]; ok {
-				if e.Timestamp > s.lastTS {
-					s.lastTS = e.Timestamp
-				}
-			}
-			continue
-		}
-
-		if s, ok := sessions[e.SessionID]; ok {
-			if e.Timestamp > s.lastTS {
-				s.lastTS = e.Timestamp
-			}
-		} else {
-			sessions[e.SessionID] = &sessionAcc{
-				project:      e.Project,
-				firstDisplay: e.Display,
-				firstTS:      e.Timestamp,
-				lastTS:       e.Timestamp,
-			}
-			order = append(order, e.SessionID)
-		}
+		candidates = append(candidates, candidate{p, info.ModTime().Unix()})
 	}
-
-	// Sort by lastTS descending (most recent first)
-	// Simple selection sort for small N
-	for i := 0; i < len(order); i++ {
-		maxIdx := i
-		for j := i + 1; j < len(order); j++ {
-			if sessions[order[j]].lastTS > sessions[order[maxIdx]].lastTS {
-				maxIdx = j
-			}
-		}
-		order[i], order[maxIdx] = order[maxIdx], order[i]
-	}
+	sort.Slice(candidates, func(i, j int) bool {
+		return candidates[i].modified > candidates[j].modified
+	})
 
 	var result []RecentSession
-	for _, sid := range order {
+	for _, c := range candidates {
 		if len(result) >= limit {
 			break
 		}
-		s := sessions[sid]
-		result = append(result, RecentSession{
-			SessionID:    sid,
-			Project:      s.project,
-			FirstDisplay: s.firstDisplay,
-			LastActive:   s.lastTS,
-		})
+		s, ok := readTranscriptHead(c.path)
+		if !ok {
+			continue
+		}
+		s.LastActive = c.modified
+		result = append(result, s)
 	}
 	return result
+}
+
+// readTranscriptHead pulls the session id, working directory and opening prompt
+// out of a transcript. It reports false for transcripts with nothing worth
+// showing — one whose only user records are subagent traffic or slash commands.
+func readTranscriptHead(path string) (RecentSession, bool) {
+	f, err := os.Open(path)
+	if err != nil {
+		return RecentSession{}, false
+	}
+	defer f.Close()
+
+	s := RecentSession{SessionID: strings.TrimSuffix(filepath.Base(path), ".jsonl")}
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
+	for i := 0; i < transcriptHeadLines && scanner.Scan(); i++ {
+		var e transcriptEntry
+		if err := json.Unmarshal(scanner.Bytes(), &e); err != nil {
+			continue
+		}
+		if s.Project == "" {
+			s.Project = e.Cwd
+		}
+		if s.FirstDisplay != "" || e.Type != "user" || e.IsMeta || e.IsSidechain {
+			continue
+		}
+		s.FirstDisplay = promptText(e.Message.Content)
+	}
+	if s.FirstDisplay == "" || s.Project == "" {
+		return RecentSession{}, false
+	}
+	return s, true
+}
+
+// promptText reduces a message content field — a plain string, or a list of
+// blocks — to the one line worth putting in a menu. Slash commands and the
+// XML-tagged envelopes Claude Code injects (command output, reminders) are not
+// what the user typed, so they yield nothing and the search moves on.
+func promptText(raw json.RawMessage) string {
+	var text string
+	if err := json.Unmarshal(raw, &text); err != nil {
+		var blocks []struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		}
+		if err := json.Unmarshal(raw, &blocks); err != nil {
+			return ""
+		}
+		for _, b := range blocks {
+			if b.Type == "text" && strings.TrimSpace(b.Text) != "" {
+				text = b.Text
+				break
+			}
+		}
+	}
+	for _, line := range strings.Split(text, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if strings.HasPrefix(line, "<") || strings.HasPrefix(line, "/") || line == "exit" {
+			return ""
+		}
+		return line
+	}
+	return ""
 }
 
 func projectName(fullPath string) string {
