@@ -97,3 +97,24 @@ func TestDisplayModeValid(t *testing.T) {
 		}
 	}
 }
+
+func TestPercentMarked(t *testing.T) {
+	p := func(v float64) *float64 { return &v }
+	tests := []struct {
+		in   *float64
+		want string
+	}{
+		{nil, "--"},
+		{p(0), "0%"},
+		{p(79), "79%"},
+		// The threshold itself counts as crossed, so a window sitting exactly on
+		// it is flagged rather than waiting for the next reading.
+		{p(80), "80% \u26a0\ufe0e"},
+		{p(100), "100% \u26a0\ufe0e"},
+	}
+	for _, tt := range tests {
+		if got := PercentMarked(tt.in); got != tt.want {
+			t.Errorf("PercentMarked(%v) = %q, want %q", tt.in, got, tt.want)
+		}
+	}
+}

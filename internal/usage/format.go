@@ -17,6 +17,30 @@ func Percent(p *float64) string {
 	return fmt.Sprintf("%.0f%%", *p)
 }
 
+// WarnAbove is the utilization at which a window is worth flagging. The
+// dropdown draws a bar, which shows a nearly-full window without being told;
+// the menu bar title has room for a number and nothing else, so there a window
+// this high gets a mark instead.
+const WarnAbove = 80
+
+// warnMark flags a window that has reached WarnAbove. The variation selector is
+// not decoration: macOS draws U+26A0 on its own as a colour emoji, and U+FE0E
+// asks for the text glyph instead, which takes the menu bar's own colour in
+// both light and dark and sits with the numbers rather than shouting over them.
+// Written as escapes because the selector is invisible, and an editor that
+// dropped it would quietly bring the emoji back.
+const warnMark = " \u26a0\ufe0e"
+
+// PercentMarked renders a utilization for the menu bar title, flagging a window
+// that has reached WarnAbove. The mark is the whole point of the title at that
+// moment: the number is already on screen, and what it has crossed is not.
+func PercentMarked(p *float64) string {
+	if p != nil && *p >= WarnAbove {
+		return Percent(p) + warnMark
+	}
+	return Percent(p)
+}
+
 // Bar draws a fixed-width progress bar. Out-of-range values are clamped rather
 // than trusted: the numbers come from outside this program.
 func Bar(p *float64) string {

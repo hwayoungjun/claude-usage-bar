@@ -220,8 +220,8 @@ func (w *Widget) refresh() {
 		return
 	}
 	systray.SetTitle(usage.TrayTitle(w.settings.DisplayMode,
-		usage.Percent(snapshot.Data.FiveHour.UsedPercentage),
-		usage.Percent(snapshot.Data.SevenDay.UsedPercentage)))
+		usage.PercentMarked(snapshot.Data.FiveHour.UsedPercentage),
+		usage.PercentMarked(snapshot.Data.SevenDay.UsedPercentage)))
 }
 
 func (w *Widget) showWindows(s usage.Snapshot) {
