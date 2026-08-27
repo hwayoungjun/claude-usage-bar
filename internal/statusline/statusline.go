@@ -16,6 +16,15 @@ import (
 // Input is the part of the hook payload this app uses. Rate limits are absent
 // for non-subscribers and until the first API response of a session.
 type Input struct {
+	// The payload also declares seven_day_opus, seven_day_sonnet,
+	// seven_day_oauth_apps, a model_scoped list the server labels itself, and an
+	// extra_usage credit budget. None are read here. On the one account this
+	// could be checked against — a Team seat on the Max 5x limit tier, against
+	// Claude Code 2.1.247 — every one of them arrived null or absent, so there
+	// was nothing to draw and no live value to learn the unfamiliar shapes from
+	// (model_scoped reports a utilization in unstated units and a reset time
+	// typed as a string rather than the epoch seconds used below). Should a row
+	// ever turn out to be missing, they take the same shape as these two.
 	RateLimits *struct {
 		FiveHour *usage.Rate `json:"five_hour"`
 		SevenDay *usage.Rate `json:"seven_day"`
